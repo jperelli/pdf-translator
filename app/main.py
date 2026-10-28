@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from app.ai.setup import configure_sdk
-from app.config import get_settings
+from app.config import PURPOSES, get_settings
 from app.formats import InvalidDocument, detect
 from app.jobs import JobStore
 from app.languages import LANGUAGES
@@ -92,11 +92,11 @@ def samples():
 
 @app.post("/api/jobs", status_code=202)
 async def create_job(request: Request, target: str = Form(...), file: UploadFile | None = File(None),
-                     sample: str | None = Form(None), purpose: str = Form("publish")):
+                     sample: str | None = Form(None), purpose: str = Form("fast")):
     if target not in LANGUAGES:
         raise HTTPException(422, f"Unsupported target language: {target}")
-    if purpose not in ("understand", "publish"):
-        raise HTTPException(422, "purpose must be 'understand' or 'publish'.")
+    if purpose not in PURPOSES:
+        raise HTTPException(422, "purpose must be 'fast' or 'quality'.")
     limit = settings.max_upload_mb * 1024 * 1024
     if sample:
         path = SAMPLES / Path(sample).name

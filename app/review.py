@@ -7,6 +7,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from app.config import normalize_purpose
 from app.formats.pdf.fontmatch import FONT_DIR, Candidate, rank
 from app.formats.pdf.render import FontBook, plain_text
 from app.models import Analysis, BlockResult
@@ -45,7 +46,7 @@ def build_items(blocks: list[BlockResult], analysis: Analysis, fonts: FontBook |
             "blocks": [b.id for b in coll], "pages": sorted({b.page for b in coll}),
             "options": [{"id": "shorten", "label": "Shorten the text (Refiner)", "tokens": True},
                         {"id": "shrink", "label": "Let the text shrink more (down to 50%)", "tokens": False}]
-            + ([{"id": "accept", "label": "Accept (draft only)", "tokens": False}] if purpose == "understand" else []),
+            + ([{"id": "accept", "label": "Accept (Fast mode only)", "tokens": False}] if normalize_purpose(purpose) == "fast" else []),
             "default": "shorten"})
 
     by_font: dict[str, list[BlockResult]] = {}

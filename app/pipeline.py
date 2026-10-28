@@ -79,7 +79,7 @@ def _sample_for_analysis(pages: list[list[TextUnit]], budget: int = 9000) -> lis
 
 
 class TranslationPipeline:
-    def __init__(self, settings: Settings, emit: Emit, job_id: str = "local", purpose: str = "publish",
+    def __init__(self, settings: Settings, emit: Emit, job_id: str = "local", purpose: str = "fast",
                  version: int = 1):
         self.purpose = purpose
         self.version = version

@@ -163,7 +163,7 @@ class QualityReport(BaseModel):
     output_overlaps: int = 0  # overlapping text lines found by reading the final PDF back
     missing_glyph_blocks: int = 0
     font_substituted_blocks: int = 0
-    purpose: str = "publish"
+    purpose: str = "fast"
     blocks_total: int
     blocks_below_threshold: int
     blocks_refined: int

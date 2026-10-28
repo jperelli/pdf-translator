@@ -58,7 +58,7 @@ class JobStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = Store(settings.data_dir / "translator.sqlite3")
 
-    async def create(self, filename: str, target: str, data: bytes, purpose: str = "publish") -> Job:
+    async def create(self, filename: str, target: str, data: bytes, purpose: str = "fast") -> Job:
         job_id = uuid.uuid4().hex
         d = self.root / job_id
         d.mkdir(parents=True)

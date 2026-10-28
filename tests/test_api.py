@@ -58,9 +58,9 @@ def test_full_job(client):
 
 
 def test_history_versions_and_redo(client):
-    r = client.post("/api/jobs", data={"target": "es", "sample": "08-jargon-en.pdf", "purpose": "understand"})
+    r = client.post("/api/jobs", data={"target": "es", "sample": "08-jargon-en.pdf", "purpose": "fast"})
     job = wait(client, r.json()["id"])
-    assert job["status"] == "done" and job["purpose"] == "understand"
+    assert job["status"] == "done" and job["purpose"] == "fast"
     jid = job["id"]
     listed = client.get("/api/jobs").json()
     assert any(j["id"] == jid and j["versions"] == 1 for j in listed["jobs"])
@@ -74,6 +74,6 @@ def test_history_versions_and_redo(client):
     for v in (1, 2):
         pdf = client.get(f"/api/jobs/{jid}/download?version={v}")
         assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
-    assert client.post("/api/jobs", data={"target": "es", "sample": "01-simple-en.pdf", "purpose": "x"}).status_code == 422
+    assert client.post("/api/jobs", data={"target": "es", "sample": "01-simple-en.pdf", "purpose": "publish"}).status_code == 422
     assert client.delete(f"/api/jobs/{jid}").status_code == 200
     assert client.get(f"/api/jobs/{jid}").status_code == 404

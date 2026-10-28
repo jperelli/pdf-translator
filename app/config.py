@@ -81,8 +81,9 @@ class Settings(BaseSettings):
         return table.get(model, (0.0, 0.0))
 
     def for_purpose(self, purpose: str) -> "Settings":
-        """'understand' is a cheap draft; 'publish' is the professional pass. Overlaps are blocked in both."""
-        if purpose == "understand":
+        """'fast' is cheap (no escalation, the translator model also judges); 'quality' is the thorough pass
+        that checks styling and fixes layout mismatches. Overlaps are blocked in both."""
+        if normalize_purpose(purpose) == "fast":
             return self.model_copy(update={"min_font_scale": 0.6, "enable_escalation": False,
                                            "judge_model": self.translator_model, "max_refine_iterations": 1})
         return self.model_copy(update={"min_font_scale": max(self.min_font_scale, 0.8)})
@@ -92,6 +93,14 @@ class Settings(BaseSettings):
         if self.llm_backend == "auto":
             return "openai" if self.openai_api_key else "pseudo"
         return self.llm_backend
+
+
+PURPOSES = ("fast", "quality")
+_LEGACY_PURPOSES = {"understand": "fast", "publish": "quality"}  # names used by runs stored before the rename
+
+
+def normalize_purpose(purpose: str) -> str:
+    return _LEGACY_PURPOSES.get(purpose, purpose if purpose in PURPOSES else "quality")
 
 
 @lru_cache

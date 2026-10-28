@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
     target TEXT NOT NULL,
-    purpose TEXT NOT NULL DEFAULT 'publish',
+    purpose TEXT NOT NULL DEFAULT 'fast',
     status TEXT NOT NULL,
     error TEXT,
     created REAL NOT NULL,

@@ -15,7 +15,6 @@
   <nav class="nav">
     <a href="#" id="nav-new">Translate</a>
     <a href="#history" id="nav-history">History</a>
-    <span id="mode" class="mode"></span>
   </nav>
 </header>
 
@@ -23,8 +22,6 @@
   <!-- upload -->
   <section id="upload" class="panel">
     <h1>Translate a PDF, keep the layout.</h1>
-    <p class="lead">Upload a document, pick a language. Agents analyse it, translate page by page, check every
-      block against the original layout and a quality reviewer, fix what fails and tell you what still needs a decision.</p>
     <form id="form">
       <label id="drop" class="drop" tabindex="0">
         <input id="file" type="file" accept="application/pdf,.pdf" hidden>
@@ -33,10 +30,10 @@
         <span id="drop-hint" class="hint"></span>
       </label>
       <div class="purpose" role="radiogroup" aria-label="Purpose">
-        <label class="purpose-card"><input type="radio" name="purpose" value="understand">
-          <b>Understand</b><span>Draft to read and understand. Cheaper: no escalation, the translator model also reviews, fonts may fall back.</span></label>
-        <label class="purpose-card"><input type="radio" name="purpose" value="publish" checked>
-          <b>Publish</b><span>Professional final pass. Stronger reviewer, escalation, minimal font shrinking, every fidelity problem listed for review.</span></label>
+        <label class="purpose-card"><input type="radio" name="purpose" value="fast" checked>
+          <b>Fast</b><ul><li>Fast and cheap</li><li>Good translation</li><li>No thorough style check</li></ul></label>
+        <label class="purpose-card"><input type="radio" name="purpose" value="quality">
+          <b>Quality</b><ul><li>Slower and more expensive</li><li>Good translation</li><li>Checks styling thoroughly and fixes layout mismatches</li></ul></label>
       </div>
       <div class="row">
         <label class="field">Translate to <select id="target"></select></label>

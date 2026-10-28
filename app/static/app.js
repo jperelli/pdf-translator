@@ -7,6 +7,9 @@ const STAGES = ["validate", "extract", "analyze", "translate", "render", "done"]
 const state = { config: null, file: null, job: null, version: null, pages: 0, page: 1, result: null, events: [],
   history: { offset: 0, limit: 25 }, decisions: {}, logFilter: new Set() };
 
+// older runs were stored as understand/publish
+const PURPOSES = { fast: "Fast", quality: "Quality", understand: "Fast", publish: "Quality" };
+const purposeLabel = (p) => PURPOSES[p] || "Quality";
 const cls = (score) => (score >= 85 ? "ok" : score >= 65 ? "mid" : "bad");
 const fmtTokens = (n) => (n > 9999 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n)));
 const fmtUsd = (n) => "$" + (n < 0.01 ? n.toFixed(4) : n.toFixed(2));
@@ -48,13 +51,10 @@ window.addEventListener("hashchange", route);
 // ------------------------------------------------------------------ upload
 async function init() {
   state.config = await api("/api/config");
-  const mode = $("#mode");
-  if (state.config.backend === "openai") { mode.textContent = `Live · ${state.config.models.translator}`; mode.className = "mode live"; }
-  else { mode.textContent = "Demo mode · pseudo-translation"; mode.className = "mode pseudo"; }
   const sel = $("#target");
   for (const l of state.config.languages) sel.add(new Option(`${l.name} · ${l.native}`, l.code));
   sel.value = localStorage.getItem("target") || "es";
-  const purpose = localStorage.getItem("purpose") || "publish";
+  const purpose = localStorage.getItem("purpose") === "quality" ? "quality" : "fast";
   $$('input[name="purpose"]').forEach((r) => (r.checked = r.value === purpose));
   $("#drop-hint").textContent = `Up to ${state.config.limits.max_upload_mb} MB and ${state.config.limits.max_pages} pages`;
   const samples = await api("/api/samples").catch(() => []);
@@ -109,7 +109,7 @@ function reset(clear) {
 async function start({ file, sample }) {
   const fd = new FormData();
   fd.append("target", $("#target").value);
-  fd.append("purpose", ($('input[name="purpose"]:checked') || {}).value || "publish");
+  fd.append("purpose", ($('input[name="purpose"]:checked') || {}).value || "fast");
   if (file) fd.append("file", file);
   if (sample) fd.append("sample", sample);
   $("#go").disabled = true;
@@ -134,7 +134,7 @@ function follow(job) {
   state.events = [];
   const lang = state.config.languages.find((l) => l.code === job.target);
   $("#job-title").textContent = job.filename + (job.version > 1 ? ` · v${job.version}` : "");
-  $("#job-sub").textContent = `→ ${lang ? lang.name : job.target} · ${job.purpose === "understand" ? "Understand (draft)" : "Publish"}`;
+  $("#job-sub").textContent = `→ ${lang ? lang.name : job.target} · ${purposeLabel(job.purpose)}`;
   $("#log").innerHTML = ""; $("#pages").innerHTML = ""; $("#job-error").hidden = true;
   $("#bar-fill").style.width = "0";
   show("progress");
@@ -226,7 +226,7 @@ function showResult(job) {
   sc.className = `score ${cls(r.score)}`;
   $("#subscores").innerHTML = `<span class="${cls(r.translation_score)}">translation ${Math.round(r.translation_score)}</span>` +
     `<span class="${cls(r.layout_score)}">layout ${Math.round(r.layout_score)}</span>` +
-    `<span class="muted">${r.purpose === "understand" ? "draft" : "publish"}${r.backend === "pseudo" ? " · demo (pseudo)" : ""}</span>`;
+    `<span class="muted">${purposeLabel(r.purpose).toLowerCase()}${r.backend === "pseudo" ? " · demo (pseudo)" : ""}</span>`;
   $("#reasons").innerHTML = r.passed ? `<span class="ok">Passed</span>` :
     r.fail_reasons.map((x) => `<span class="bad">${esc(x)}</span>`).join("");
   $("#download").href = `/api/jobs/${job.id}/download?version=${state.version}`;
@@ -466,7 +466,7 @@ async function loadHistory() {
   const data = await api(`/api/jobs?limit=${limit}&offset=${offset}`);
   const rows = data.jobs.map((j) => `<tr>
       <td>${esc(fmtDate(j.created))}</td><td class="fname">${esc(j.filename)}</td><td>${esc(j.target)}</td>
-      <td>${j.purpose === "understand" ? "draft" : "publish"}</td><td>${j.versions || 0}</td>
+      <td>${purposeLabel(j.purpose)}</td><td>${j.versions || 0}</td>
       <td>${j.score != null ? `<b class="${cls(j.score)}">${Math.round(j.score)}</b> <span class="muted">${Math.round(j.translation_score)}/${Math.round(j.layout_score)}</span>` : "–"}</td>
       <td>${j.pages ?? "–"}</td><td>${fmtTokens(j.tokens || 0)}</td><td>${fmtUsd(j.cost_usd || 0)}</td>
       <td><span class="status ${j.status}">${esc(j.status)}</span></td>

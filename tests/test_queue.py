@@ -12,7 +12,7 @@ def make_job(samples, name="01-simple-en.pdf", target="de"):
     job_id = uuid.uuid4().hex
     job_dir(job_id).mkdir(parents=True)
     shutil.copy(samples / name, job_dir(job_id) / "source.pdf")
-    store().create_job(job_id, name, target, "publish")
+    store().create_job(job_id, name, target, "quality")
     return job_id
 
 
