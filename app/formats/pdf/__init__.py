@@ -7,7 +7,7 @@ import pymupdf
 
 from app.formats.base import InvalidDocument
 from app.formats.pdf.extract import extract_page, is_scanned
-from app.formats.pdf.render import MUPDF, FontBook, PageGeometry, Probe, erase, plan_fit, probe, write_unit
+from app.formats.pdf.render import MUPDF, FontBook, PageGeometry, Probe, StoryWriter, erase, plan_fit, probe
 from app.languages import Language
 from app.models import Fit, TextUnit
 from app.models import Issue
@@ -114,7 +114,8 @@ class PdfDocument:
     def render(self, translations: dict[str, str], target: Language, out: Path) -> dict:
         with MUPDF:
             result = pymupdf.open(self.path)
-            scales, fits, issues, overlaps = {}, {}, {}, {}
+            fits, issues, overlaps = {}, {}, {}
+            writer = StoryWriter(result)
             for pno in range(self.page_count):
                 page = result[pno]
                 texts = {u.id: translations[u.id] for u in self.units(pno) if u.id in translations}
@@ -123,8 +124,11 @@ class PdfDocument:
                 erase(page, units)
                 for u in units:
                     fit, _pr, iss = layout[u.id]
-                    scales[u.id] = write_unit(page, u, texts[u.id], fit, target, self.fonts)
+                    writer.add(pno, u, texts[u.id], fit)
                     fits[u.id], issues[u.id] = fit, iss
+            scales = writer.write(target, self.fonts)
+            for pno in range(self.page_count):
+                page = result[pno]
                 before = overlapping_output_lines(self.doc[pno])
                 after = overlapping_output_lines(page)
                 new = [pair for pair in after if not any(abs(pair[0].y0 - b[0].y0) < 1 and abs(pair[0].x0 - b[0].x0) < 1

@@ -319,7 +319,7 @@ async def estimate(request: Request, job_id: str):
     blocks = {b["id"]: BlockResult.model_validate(b) for b in job.result["blocks"]}
     tokens = estimate_tokens(decisions, blocks)
     model = settings.translator_model
-    pin, pout = settings.price(model)
+    pin, pout, _cached = settings.price(model)
     return {"tokens": tokens, "cost_usd": round(tokens * 0.6 * pin / 1e6 + tokens * 0.4 * pout / 1e6, 4),
             "model": model if settings.backend == "openai" else "pseudo"}
 

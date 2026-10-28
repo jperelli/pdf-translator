@@ -8,7 +8,8 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-PRICES: dict[str, tuple[float, float]] = {
+# (input, output) or (input, output, cached input); cached defaults to 10% of input (OpenAI's rate for GPT-5.x)
+PRICES: dict[str, tuple[float, ...]] = {
     "gpt-5.5": (5.00, 30.00),
     "gpt-5.4": (2.50, 15.00),
     "gpt-5.4-mini": (0.75, 4.50),
@@ -18,8 +19,8 @@ PRICES: dict[str, tuple[float, float]] = {
     "gpt-5.6-sol": (4.00, 20.00),
     "gpt-5": (1.25, 10.00),
     "gpt-5-mini": (0.25, 2.00),
-    "gpt-4.1": (2.00, 8.00),
-    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1": (2.00, 8.00, 0.50),
+    "gpt-4.1-mini": (0.40, 1.60, 0.10),
 }
 
 
@@ -82,9 +83,11 @@ class Settings(BaseSettings):
     stale_after_s: float = 180  # a running job without a heartbeat for this long lost its worker
     max_attempts: int = 2  # first run + one automatic retry after a lost worker
 
-    def price(self, model: str) -> tuple[float, float]:
+    def price(self, model: str) -> tuple[float, float, float]:
+        """USD per 1M tokens: (input, output, cached input)."""
         table = {**PRICES, **{k: tuple(v) for k, v in (json.loads(self.model_prices) if self.model_prices else {}).items()}}
-        return table.get(model, (0.0, 0.0))
+        p = table.get(model, (0.0, 0.0))
+        return (p[0], p[1], p[2] if len(p) > 2 else p[0] * 0.1)
 
     def for_purpose(self, purpose: str) -> "Settings":
         """'fast' is cheap (no escalation, the translator model also judges); 'quality' is the thorough pass

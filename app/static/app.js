@@ -399,10 +399,10 @@ function renderStats(job) {
   const backforth = ((byStage.refine || {}).tokens || 0) + ((byStage.escalate || {}).tokens || 0) + ((byStage.redo || {}).tokens || 0);
   const add = (acc, c) => {
     acc.tokens += tok(c); acc.cost += c.cost_usd; acc.requests += c.requests; acc.seconds += c.seconds;
-    acc.input += c.input_tokens; acc.output += c.output_tokens;
+    acc.input += c.input_tokens; acc.output += c.output_tokens; acc.cached += c.cached_tokens || 0;
     return acc;
   };
-  const empty = () => ({ tokens: 0, cost: 0, requests: 0, seconds: 0, input: 0, output: 0 });
+  const empty = () => ({ tokens: 0, cost: 0, requests: 0, seconds: 0, input: 0, output: 0, cached: 0 });
   const stages = {};
   for (const c of calls) add((stages[c.stage] = stages[c.stage] || { key: c.stage, ...empty() }), c);
   const pages = r.pages.map((p) => ({ page: p.page, parts: {} }));
@@ -420,7 +420,7 @@ function renderStats(job) {
   const versions = (job.versions || []).filter((v) => v.score != null);
   $("#stats").innerHTML = `
     <div class="stat-row">
-      <div class="stat"><b>${fmtTokens(totalTok)}</b><span>tokens this version</span></div>
+      <div class="stat"><b>${fmtTokens(totalTok)}</b><span>tokens this version · ${fmtTokens(sum(calls, (c) => c.cached_tokens || 0))} input from the prompt cache</span></div>
       <div class="stat"><b>${fmtUsd(totalCost)}</b><span>estimated cost (list prices)</span></div>
       <div class="stat"><b>${fmtTokens(evaluation)}</b><span>evaluation (judge)</span></div>
       <div class="stat"><b>${fmtTokens(backforth)}</b><span>back and forth (refine, escalate, redo)</span></div>

@@ -114,3 +114,50 @@ def test_redo_edit_and_transliterate(samples, tmp_path):
     edited = next(b for b in res2["blocks"] if b["id"] == bid)
     assert edited["translation"] == "Willkommen auf Ihrem neuen Motorrad"
     assert "Willkommen auf Ihrem neuen Motorrad" in pymupdf.open(tmp_path / "v2.pdf")[0].get_text()
+
+
+def test_prompt_sends_only_terms_of_the_batch():
+    """The glossary and protected terms are filtered per batch, whole words only, and come last."""
+    from app.ai import prompts
+    from app.ai.agents import TranslationContext, _fmt
+    from app.languages import get_language
+    from app.models import Analysis, Term
+
+    analysis = Analysis(source_language="en", source_language_name="English", tone="formal", domain="CV",
+                        summary="A CV.", protected_terms=[Term(term="Stark", kind="brand", reason=""),
+                                                          Term(term="CTO", kind="other", reason="")],
+                        jargon=[{"term": "holeshot", "translation": "salida", "note": ""},
+                                {"term": "berm", "translation": "peralte", "note": ""}])
+    ctx = TranslationContext(target=get_language("es"), analysis=analysis,
+                             batch_text="Stark riders love the holeshot. The director agreed.")
+    text = _fmt(prompts.TRANSLATOR, ctx)
+    assert '"Stark"' in text and "holeshot -> salida" in text
+    assert "CTO" not in text and "berm" not in text  # "cto" inside "director" is not the term
+    assert text.index("DOCUMENT") < text.index("TERMS IN THESE BLOCKS")  # per-call part goes last
+    other = _fmt(prompts.TRANSLATOR, TranslationContext(target=get_language("es"), analysis=analysis,
+                                                         batch_text="Berms everywhere."))
+    prefix = text[:text.index("TERMS IN THESE BLOCKS")]
+    assert other.startswith(prefix)  # identical prefix across calls of one job: cacheable
+
+
+def test_cache_key_per_job_and_agent():
+    from app.ai.agents import AgentFactory
+
+    f = AgentFactory(Settings(llm_backend="pseudo"), cache_key="job1")
+    assert f.judge().model_settings.extra_args is None  # the local model has no cache
+    f.pseudo = False
+    assert f.judge().model_settings.extra_args == {"prompt_cache_key": "pdf-translator:job1:judge"}
+    assert f.translator().model_settings.extra_args["prompt_cache_key"].endswith(":translator")
+
+
+def test_judge_lists_only_errors_and_covers_everything(samples, tmp_path):
+    res, _ = run(samples / "01-simple-en.pdf", tmp_path / "o.pdf", "de")
+    assert res["report"]["judge_coverage"] == 1.0  # blocks the judge left out count as judged correct
+
+
+def test_chinese_font_is_embedded_once(samples, tmp_path):
+    res, _ = run(samples / "02-tight-boxes-en.pdf", tmp_path / "o.pdf", "zh")
+    out = pymupdf.open(tmp_path / "o.pdf")
+    cjk = {x for p in out for x, *_rest in p.get_fonts(full=True) if "Fallback" in _rest[2] or "CJK" in _rest[2]}
+    assert len(cjk) == 1, cjk  # insert_htmlbox embedded one copy per block
+    assert (tmp_path / "o.pdf").stat().st_size < 5_000_000

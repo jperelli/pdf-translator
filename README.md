@@ -166,6 +166,45 @@ flowchart LR
   (1.1 GB peak for that job, freed afterwards). Workers also run with `MALLOC_ARENA_MAX=2` and are recycled
   after `WORKER_MAX_TASKS` jobs (default 10). The admin page and the dashboard show memory per process.
 
+### Speed and cost
+
+Measured with the real models in Quality mode on samples 10 (CV-like → German), 08 (jargon → Spanish) and
+03 (two columns → German), before and after (see `docs/research-faster-cheaper.md`):
+
+- **Cost:** −30% overall, −42% on the CV.
+- **Wall time:** −33% overall, about half on the CV.
+- **Judge output tokens:** −66% on the CV.
+- **Scores:** within the run-to-run noise. Three runs of sample 08 each: 91, 91, 98.5 before; 92.5, 100,
+  92.5 after.
+
+What changed:
+
+- **Terms per batch.** Each call gets only the protected terms and glossary entries that occur in its blocks
+  (whole words, so "CTO" does not match "director"). The Analyst lists at most 30 error-prone terms, most
+  important first. A CV had produced 117 entries that went whole into every call.
+- **A terse judge.** It lists only the blocks with errors, with explanations of at most 15 words. A block it
+  leaves out counts as judged correct, so judge coverage stays 100%.
+- **Cache-friendly prompts.** Every prompt is laid out as fixed rules, then the document context (identical
+  within a job), then the batch's terms. Each call carries `prompt_cache_key = job + agent`. Cached input
+  tokens are recorded per call, billed at the cached rate in the cost estimate, and shown in Stats.
+  - Expect hits mainly within multi-turn runs (the Refiner's tool calls resend the conversation) and on
+    longer documents. A cache hit needs a prefix of at least about 1,024 tokens, and our per-call prompts
+    are mostly shorter than that.
+- **One layer for all translated text.** `insert_htmlbox` builds a temporary PDF per block, fonts included:
+  into Chinese that meant one full CJK font per block. On the 20-page manual that was 166 MB before saving
+  and 34 s in `save()`. Now every block is laid out on one temporary document, so each font is embedded
+  once, and each page is overlaid. The fitting rule is identical, and so are the line positions (checked
+  on rotated pages too).
+
+  Manual into Chinese:
+
+  | | Before | After |
+  |---|---|---|
+  | Render | 45 s | 2.4 s |
+  | Peak memory | 1.1 GB | 390 MB |
+  | File size | – | 3.6 MB |
+  | Score | 99.3 | 99.3 |
+
 ### Agents SDK features used
 
 - **Structured outputs** (`output_type`, Pydantic, strict JSON schema) for every agent.

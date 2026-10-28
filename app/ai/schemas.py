@@ -43,9 +43,9 @@ class JudgeError(BaseModel):
     severity: Literal["minor", "major", "critical"]
     category: Literal["accuracy", "omission", "addition", "mistranslation", "untranslated", "terminology",
                       "fluency", "grammar", "style", "locale", "markup"]
-    span: str = Field(description="The offending part of the translation (or of the source for omissions)")
-    explanation: str
-    suggestion: str = Field(description="A concrete fix, or an empty string")
+    span: str = Field(description="The offending words of the translation (of the source for omissions)")
+    explanation: str = Field(description="At most 15 words")
+    suggestion: str = Field(description="Just the corrected words, or an empty string")
 
 
 class JudgedBlock(BaseModel):
@@ -54,4 +54,4 @@ class JudgedBlock(BaseModel):
 
 
 class JudgeReport(BaseModel):
-    blocks: list[JudgedBlock]
+    blocks: list[JudgedBlock] = Field(description="Only the blocks that have errors; omit correct blocks")

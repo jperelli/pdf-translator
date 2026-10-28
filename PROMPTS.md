@@ -220,6 +220,17 @@ Status: version 1 of every prompt validated on the first live eval runs (scores 
 DE/AR/ZH/EN); version 2 adds line breaks, underlines and user instructions (see below), validated live on
 10-cv-like and 11-subset-heading into German (97.2 and 99.2, no overlaps).
 
+Version 3 (October 2026) reorders every prompt for prompt caching and cost:
+
+1. the agent's fixed rules;
+2. a `DOCUMENT` section (domain, tone, style, summary), identical within a job;
+3. a `TERMS IN THESE BLOCKS` section with only the protected terms and glossary entries found in that call's
+   blocks.
+
+The Analyst lists at most 30 error-prone terms, most important first. The Judge reports only the blocks
+with errors, with explanations of at most 15 words. Measured live: −30% cost and −33% time on three
+samples, with scores within the run-to-run noise.
+
 All are in `app/ai/prompts.py`; placeholders like `{target_name}` are filled per run from the typed run
 context (target language + document analysis). Inputs are JSON; outputs are strict JSON schemas
 (`app/ai/schemas.py`), so the prompts never describe the output format in prose.

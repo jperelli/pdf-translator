@@ -58,7 +58,7 @@ const Charts = (() => {
             label: (ctx) => `${m.fmt(ctx.parsed.x)} ${metric === "tokens" ? "tokens" : ""}`.trim(),
             afterLabel: (ctx) => {
               const s = stages[ctx.dataIndex];
-              return [`input ${METRICS.tokens.fmt(s.input)} · output ${METRICS.tokens.fmt(s.output)}`,
+              return [`input ${METRICS.tokens.fmt(s.input)} (${METRICS.tokens.fmt(s.cached || 0)} cached) · output ${METRICS.tokens.fmt(s.output)}`,
                 `${s.requests} request(s) · ${METRICS.cost.fmt(s.cost)} · ${METRICS.seconds.fmt(s.seconds)}`];
             },
           } },

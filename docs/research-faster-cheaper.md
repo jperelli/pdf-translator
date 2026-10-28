@@ -1,6 +1,14 @@
 # Research: faster and cheaper translations without losing quality
 
-Date: 2026-10-28. Status: research only, nothing implemented.
+Date: 2026-10-28.
+
+Status:
+
+- **Implemented:** levers 2 (glossary per batch, capped analysis, terse judge), 4 (cache-friendly prompts,
+  cache key per job and agent, cached tokens recorded) and 7 (one CJK font for the whole document).
+- **Not implemented yet:** levers 1, 3, 5 and 6.
+
+Measured results are in the "Results" section at the end.
 
 ## Where the time and money go today (measured)
 
@@ -204,6 +212,36 @@ prices.
 3. **Lever 3** (parallel judge chunks, escalate earlier), measured on wall time.
 4. **Lever 5** (translation memory).
 5. **Lever 6** (Economy option), and luna for translation only if the eval says so.
+
+## Results (levers 2, 4 and 7)
+
+Same samples, Quality mode, real models. The current code and the previous commit (a git worktree) ran
+side by side:
+
+| Sample | Cost before → after | Wall time before → after | Score before → after |
+|---|---|---|---|
+| 10 CV-like → de | $0.0407 → $0.0238 | 42 s → 22 s | 95.4 → 97.1 |
+| 08 jargon → es | $0.0216 → $0.0121 | 21 s → 13 s | 100 → 91 (noise, see below) |
+| 03 two columns → de | $0.0246 → $0.0248 | 14 s → 17 s | 97.3 → 95.8 |
+| **Total** | **$0.087 → $0.061 (−30%)** | **78 s → 52 s (−33%)** | |
+
+- **Judge output on the CV:** 1,693 → 583 tokens.
+- **Prompt cache:** the only hit was 1,152 of 1,355 analysis input tokens on the CV. It came from running
+  the same document with the same job id minutes earlier (the benchmark was repeated), not from calls
+  within one run. Within a run, the prefixes of these small documents stay below the cacheable minimum.
+  Caching pays on re-runs and long documents; the saving above comes from levers 2 and 7.
+- **Noise on sample 08:** three more runs each gave 91, 91, 98.5 before and 92.5, 100, 92.5 after. The
+  variation comes from one block (`p1-b4`) that the judge flags differently each time, so the 91 is
+  run-to-run noise.
+- **Not caused by this change:** in both versions, a block with one *major* judge error is sometimes accepted
+  without a refine round. That deserves its own look.
+- **Chinese, 20-page manual (demo model):**
+
+  | | Before | After |
+  |---|---|---|
+  | Render | 45 s | 2.4 s |
+  | Peak memory | 1.1 GB | 390 MB |
+  | Score | 99.3 | 99.3 |
 
 [pricing]: https://platform.openai.com/docs/pricing
 [terra]: https://platform.openai.com/docs/models/gpt-6.1-terra

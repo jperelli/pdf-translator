@@ -10,9 +10,11 @@ Overflow ladder for each unit (stop at the first rung that fits):
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import threading
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from html import escape
@@ -426,15 +428,57 @@ def erase(page: pymupdf.Page, units: list[TextUnit]) -> None:
                               text=pymupdf.PDF_REDACT_TEXT_NONE)
 
 
-def write_unit(page: pymupdf.Page, unit: TextUnit, text: str, fit: Fit, lang: Language,
-               fonts: FontBook | None) -> float:
+class StoryWriter:
+    """Writes every translated block of a document through ONE temporary PDF, then overlays each page.
+
+    `page.insert_htmlbox` builds a temporary PDF per block and copies it in, fonts included: with Chinese that
+    is one full CJK fallback font per block (193 copies, 166 MB before saving, 34 s in `save()` for 20
+    pages). Here each font is embedded once for the whole document. Same fitting rule as insert_htmlbox
+    (largest scale >= scale_low, 1 pt body margin), so the result matches what the probes measured.
+    """
+
+    def __init__(self, doc: pymupdf.Document):
+        self.doc = doc
+        self.pending: dict[int, list[tuple[TextUnit, str, Fit]]] = defaultdict(list)
+
+    def add(self, pno: int, unit: TextUnit, text: str, fit: Fit) -> None:
+        self.pending[pno].append((unit, text, fit))
+
+    def write(self, lang: Language, fonts: FontBook | None) -> dict[str, float]:
+        """Draw everything; returns the scale used per unit id."""
+        if not self.pending:
+            return {}
+        scales: dict[str, float] = {}
+        buf = io.BytesIO()
+        writer = pymupdf.DocumentWriter(buf)
+        pages = sorted(self.pending)
+        for pno in pages:
+            dev = writer.begin_page(self.doc[pno].rect)
+            for unit, text, fit in self.pending[pno]:
+                scales[unit.id] = _draw(dev, unit, text, fit, lang, fonts)
+            writer.end_page()
+        writer.close()
+        layer = pymupdf.open("pdf", buf.getvalue())
+        for i, pno in enumerate(pages):
+            page = self.doc[pno]
+            page.show_pdf_page(page.rect, layer, i, overlay=True)
+        layer.close()
+        return scales
+
+
+def _draw(dev, unit: TextUnit, text: str, fit: Fit, lang: Language, fonts: FontBook | None) -> float:
     html, css = unit_html(unit, text, lang, fonts)
-    css = (fonts.font_face_css() if fonts else "") + css
+    css = "body {margin:1px;}" + (fonts.font_face_css() if fonts else "") + css
     rect = pymupdf.Rect(fit.rect) if fit.rect else layout_box(unit)
     low = _low(fit)
-    spare, scale = page.insert_htmlbox(rect, html, css=css, archive=fonts.archive if fonts else None,
-                                       scale_low=low)
-    if spare < 0:  # should not happen, but never lose text: force fit
-        spare, scale = page.insert_htmlbox(rect, html, css=css, archive=fonts.archive if fonts else None,
-                                           scale_low=0)
+    story = pymupdf.Story(html=html, user_css=css, archive=fonts.archive if fonts else None)
+    box = pymupdf.Rect(0, 0, rect.width, rect.height)
+    flags = pymupdf.mupdf.FZ_PLACE_STORY_FLAG_NO_OVERFLOW
+    res = story.fit_scale(box, scale_min=1, scale_max=1 / low if low else None, flags=flags)
+    if not res.big_enough:  # should not happen, but never lose text: force fit
+        res = story.fit_scale(box, scale_min=1, scale_max=None, flags=flags)
+    scale = 1 / res.parameter
+    story.reset()
+    story.place(res.rect)
+    story.draw(dev, pymupdf.Matrix(scale, 0, 0, scale, rect.x0, rect.y0))
     return scale

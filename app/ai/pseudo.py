@@ -137,8 +137,9 @@ def _user_payload(items: list[Any]) -> dict[str, Any]:
 
 
 def _protected_terms(instructions: str) -> list[str]:
+    """The quoted terms of the TERMS section ("Protected (copy exactly as written...): "A", "B")."""
     for line in instructions.splitlines():
-        if "never translate" in line.lower() or "protected terms" in line.lower():
+        if line.startswith("Protected ("):
             return re.findall(r'"([^"]+)"', line)
     return []
 
@@ -200,7 +201,8 @@ def _judge(payload: dict[str, Any], protected: list[str]) -> dict[str, Any]:
         if tr.strip() == src.strip() and len(src.split()) > 2:
             errors.append({"severity": "major", "category": "untranslated", "span": tr[:40],
                            "explanation": "Block left untranslated.", "suggestion": ""})
-        out.append({"id": b["id"], "errors": errors})
+        if errors:  # like the real judge: only blocks with errors are listed
+            out.append({"id": b["id"], "errors": errors})
     return {"blocks": out}
 
 

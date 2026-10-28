@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -48,17 +49,26 @@ class TranslationContext:
     target: Language
     analysis: Analysis | None = None
     expected_ids: list[str] = field(default_factory=list)
+    batch_text: str | None = None  # source text of the blocks in this call: only terms found in it are sent
     fit_checker: Callable[[str, str], dict[str, Any]] | None = None
     fit_checks: int = 0
 
 
-def _protected(a: Analysis | None) -> str:
-    terms = sorted({t.term for t in a.protected_terms}) if a else []
-    return ", ".join(f'"{t}"' for t in terms) or "(none detected)"
+def occurs(term: str, text: str | None) -> bool:
+    """Whole-word, case-insensitive. None means "no batch" (send everything)."""
+    if text is None:
+        return True
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.IGNORECASE) is not None
 
 
-def _glossary(a: Analysis | None) -> str:
-    return "; ".join(f"{j.term} -> {j.translation}" for j in a.jargon) if a and a.jargon else "(none)"
+def _protected(a: Analysis | None, text: str | None = None) -> str:
+    terms = sorted({t.term for t in a.protected_terms if occurs(t.term, text)}) if a else []
+    return ", ".join(f'"{t}"' for t in terms) or "(none in these blocks)"
+
+
+def _glossary(a: Analysis | None, text: str | None = None) -> str:
+    items = [j for j in a.jargon if occurs(j.term, text)] if a else []
+    return "; ".join(f"{j.term} -> {j.translation}" for j in items) or "(none in these blocks)"
 
 
 def _fmt(template: str, ctx: TranslationContext) -> str:
@@ -69,7 +79,7 @@ def _fmt(template: str, ctx: TranslationContext) -> str:
         source_name=(src.name if src else a.source_language_name) if a else "unknown",
         domain=a.domain if a else "general documents", summary=a.summary if a else "",
         tone=a.tone if a else "neutral", style_notes=a.style_notes if a else "",
-        protected=_protected(a), glossary=_glossary(a),
+        protected=_protected(a, ctx.batch_text), glossary=_glossary(a, ctx.batch_text),
     )
 
 
@@ -108,9 +118,10 @@ def check_fit(ctx: RunContextWrapper[TranslationContext], block_id: str, text: s
 
 
 class AgentFactory:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, cache_key: str | None = None):
         self.s = settings
         self.pseudo = settings.backend == "pseudo"
+        self.cache_key = cache_key  # the job id: calls of one job share their prompt prefix
 
     def _model(self, name: str, role: str):
         if self.pseudo:
@@ -118,7 +129,7 @@ class AgentFactory:
             return PseudoModel(role)
         return name
 
-    def _settings(self, model: str, effort: str) -> ModelSettings:
+    def _settings(self, model: str, effort: str, agent: str = "") -> ModelSettings:
         retry = ModelRetrySettings(
             max_retries=self.s.llm_max_retries,
             backoff=ModelRetryBackoffSettings(initial_delay=1.0, max_delay=20.0, multiplier=2.0, jitter=True),
@@ -126,36 +137,40 @@ class AgentFactory:
                                       retry_policies.http_status([408, 409, 429, 500, 502, 503, 504])),
         )
         reasoning = Reasoning(effort=effort) if model.startswith(("gpt-5", "o")) and not self.pseudo else None
+        # one key per job and agent: requests that share a prefix are routed to the same cache (models
+        # before GPT-5.6 need it; without it the SDK keys each Runner.run separately)
+        extra = {"prompt_cache_key": f"pdf-translator:{self.cache_key}:{agent}"} if self.cache_key and agent \
+            and not self.pseudo else None
         return ModelSettings(reasoning=reasoning, retry=retry, timeout=self.s.llm_timeout_seconds,
-                             include_usage=True)
+                             include_usage=True, extra_args=extra)
 
     def analyst(self) -> Agent:
         return Agent(name="Analyst", instructions=_instructions(prompts.ANALYST),
                      model=self._model(self.s.analyst_model, "analyst"), output_type=DocumentAnalysis,
-                     model_settings=self._settings(self.s.analyst_model, self.s.reasoning_effort))
+                     model_settings=self._settings(self.s.analyst_model, self.s.reasoning_effort, "analyst"))
 
     def translator(self) -> Agent:
         return Agent(name="Translator", instructions=_instructions(prompts.TRANSLATOR),
                      model=self._model(self.s.translator_model, "translator"), output_type=TranslationBatch,
                      output_guardrails=[ids_match],
-                     model_settings=self._settings(self.s.translator_model, self.s.reasoning_effort))
+                     model_settings=self._settings(self.s.translator_model, self.s.reasoning_effort, "translator"))
 
     def refiner(self) -> Agent:
         return Agent(name="Refiner", instructions=_instructions(prompts.REFINER), tools=[check_fit],
                      model=self._model(self.s.translator_model, "refiner"), output_type=TranslationBatch,
                      output_guardrails=[ids_match],
-                     model_settings=self._settings(self.s.translator_model, self.s.reasoning_effort))
+                     model_settings=self._settings(self.s.translator_model, self.s.reasoning_effort, "refiner"))
 
     def escalation(self) -> Agent:
         return Agent(name="Escalation reviser", instructions=_instructions(prompts.ESCALATION), tools=[check_fit],
                      model=self._model(self.s.escalation_model, "refiner"), output_type=TranslationBatch,
                      output_guardrails=[ids_match],
-                     model_settings=self._settings(self.s.escalation_model, self.s.judge_reasoning_effort))
+                     model_settings=self._settings(self.s.escalation_model, self.s.judge_reasoning_effort, "escalation"))
 
     def judge(self) -> Agent:
         return Agent(name="Judge (MQM)", instructions=_instructions(prompts.JUDGE),
                      model=self._model(self.s.judge_model, "judge"), output_type=JudgeReport,
-                     model_settings=self._settings(self.s.judge_model, self.s.judge_reasoning_effort))
+                     model_settings=self._settings(self.s.judge_model, self.s.judge_reasoning_effort, "judge"))
 
 
 class AgentRunError(RuntimeError):
@@ -186,7 +201,9 @@ async def run_agent(agent: Agent, payload: Any, ctx: TranslationContext, usage: 
                 timeout=timeout)
             u = result.context_wrapper.usage
             bucket = usage.setdefault(agent.name, Usage())
-            spent = Usage(requests=u.requests, input_tokens=u.input_tokens, output_tokens=u.output_tokens)
+            details = getattr(u, "input_tokens_details", None)
+            spent = Usage(requests=u.requests, input_tokens=u.input_tokens, output_tokens=u.output_tokens,
+                          cached_tokens=getattr(details, "cached_tokens", 0) or 0)
             bucket.add(spent)
             if on_usage:
                 on_usage(spent, time.perf_counter() - t0, True)

@@ -87,7 +87,7 @@ class TranslationPipeline:
         self.s = settings
         self.emit = emit
         self.job_id = job_id
-        self.factory = AgentFactory(settings)
+        self.factory = AgentFactory(settings, cache_key=job_id)
         self.usage: dict[str, Usage] = {}
         self.timings: dict[str, float] = {}
         self.llm = asyncio.Semaphore(max(2, settings.max_concurrent_pages * 2))
@@ -106,7 +106,10 @@ class TranslationPipeline:
         self.emit({"type": "stage", "stage": stage, "message": message, "percent": round(percent, 1)})
 
     def _ctx(self, target: Language, ids: list[str] | None = None) -> TranslationContext:
-        return TranslationContext(target=target, analysis=self.analysis, expected_ids=ids or [])
+        """`ids`: the blocks of this call; only the protected terms and glossary entries found in their source
+        text go into the prompt."""
+        text = "\n".join(self.blocks[i].unit.text for i in ids if i in self.blocks) if ids else None
+        return TranslationContext(target=target, analysis=self.analysis, expected_ids=ids or [], batch_text=text)
 
     @property
     def protected(self) -> list[str]:
@@ -117,11 +120,13 @@ class TranslationPipeline:
         model = agent.model if isinstance(agent.model, str) else "pseudo"
 
         def record(u: Usage, seconds: float, _ok: bool) -> None:
-            pin, pout = self.s.price(model)
+            pin, pout, pcached = self.s.price(model)
+            cached = min(u.cached_tokens, u.input_tokens)
             self.calls.append(CallRecord(
                 agent=agent.name, model=model, stage=stage, page=page, round=rnd, blocks=blocks,
                 requests=u.requests, input_tokens=u.input_tokens, output_tokens=u.output_tokens,
-                cost_usd=round((u.input_tokens * pin + u.output_tokens * pout) / 1e6, 6),
+                cached_tokens=cached,
+                cost_usd=round(((u.input_tokens - cached) * pin + cached * pcached + u.output_tokens * pout) / 1e6, 6),
                 seconds=round(seconds, 2), version=self.version))
 
         async with self.llm:
@@ -171,6 +176,7 @@ class TranslationPipeline:
             result = await self._agent(self.factory.analyst(), {"blocks": sample}, self._ctx(target),
                                        stage="analysis", blocks=len(sample))
             self.analysis = Analysis.model_validate(result.model_dump())
+            self.analysis.jargon = self.analysis.jargon[:30]  # the prompt asks for at most 30, most error-prone first
         except AgentRunError as exc:
             log.warning("analysis failed, continuing without it: %s", exc)
             self.emit({"type": "warning", "message": "Document analysis failed; translating without a glossary."})
@@ -501,9 +507,9 @@ class TranslationPipeline:
             except AgentRunError as exc:
                 self.emit({"type": "warning", "message": f"Quality judge unavailable for {len(chunk)} blocks: {exc}"})
                 continue
+            self.judged.update(chunk)  # the judge lists only blocks with errors: the rest were judged correct
             for b in rep.blocks:
-                if b.id in candidates:
-                    self.judged.add(b.id)
+                if b.id in candidates and b.errors:
                     out[b.id] = [Issue(origin="judge", severity=e.severity, category=e.category,
                                        message=f"{e.explanation} ({e.span})" if e.span else e.explanation,
                                        suggestion=e.suggestion or None) for e in b.errors]

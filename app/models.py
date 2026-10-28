@@ -114,11 +114,13 @@ class Usage(BaseModel):
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0  # part of input_tokens served from the prompt cache
 
     def add(self, other: "Usage") -> None:
         self.requests += other.requests
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
+        self.cached_tokens += other.cached_tokens
 
 
 class PageReport(BaseModel):
@@ -147,6 +149,7 @@ class CallRecord(BaseModel):
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0  # part of input_tokens served from the prompt cache (billed at the cached rate)
     cost_usd: float = 0.0
     seconds: float = 0.0
     version: int = 1
