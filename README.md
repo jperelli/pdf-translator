@@ -70,8 +70,9 @@ it fails), **Download** and the version switcher, then three tabs:
 - **Preview**: side by side, optionally outlining the blocks with issues (click one to open it).
 - **Details**: **Jargon** (language, tone, protected terms, glossary), **Refinement** (every block with its
   two scores, issues by origin `check`/`judge`, attempt history like `translate 75 → refine 100`), **Stats**
-  (tokens and estimated cost by stage and per page, agents and models, work without tokens such as the
-  glyph builder and layout QA, timeline, all versions) and **Log** (the progress log, filterable).
+  (interactive charts: tokens, cost, requests or time by stage and per page with the numbers on hover, a click on
+  a page opens it in Preview; agents and models, work without tokens such as the glyph builder and layout QA,
+  timeline, all versions) and **Log** (the progress log, filterable).
 - **Review**: collisions, missing characters per font, low-quality blocks, heavy shrinking and terms, each
   with options marked "uses tokens" / "no tokens", an estimate before running, and **Apply and redo**.
 
@@ -348,7 +349,7 @@ app/
   fonts/                bundled OFL candidate fonts (scripts/fetch_fonts.py)
   quality/checks.py     deterministic text checks and MQM-style scoring
   quality/layout.py     collisions, font fallbacks, read-back of the written PDF
-  static/               UI (no build step)
+  static/               UI (no build step); Chart.js 4.5.1 vendored in static/vendor (MIT, CSP allows only 'self')
 scripts/start.sh        container entry point: queue workers + web
 evals/run.py            offline eval harness
 samples/                test corpus + generator

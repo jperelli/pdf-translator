@@ -5,7 +5,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const markup = (s) => esc(s).replace(/&lt;(\/?)(b|i|u)&gt;/g, "<$1$2>").replace(/&lt;br\s*\/?&gt;/g, "<br>");
 const STAGES = ["validate", "extract", "analyze", "translate", "render", "done"];
 const state = { config: null, file: null, job: null, version: null, pages: 0, page: 1, result: null, events: [],
-  history: { offset: 0, limit: 25 }, decisions: {}, logFilter: new Set() };
+  history: { offset: 0, limit: 25 }, decisions: {}, logFilter: new Set(), statsMetric: "tokens", statsData: null };
 
 // older runs were stored as understand/publish
 const PURPOSES = { fast: "Fast", quality: "Quality", understand: "Fast", publish: "Quality" };
@@ -66,8 +66,8 @@ async function init() {
     li.firstChild.onclick = () => pickSample(s);
     $("#samples").append(li);
   }
-  tabs("main", (t) => t === "preview" && renderPage());
-  tabs("details");
+  tabs("main", (t) => { if (t === "preview") renderPage(); if (t === "details") drawStats(); });
+  tabs("details", (t) => t === "stats" && drawStats());
   route();
 }
 
@@ -353,8 +353,19 @@ function renderStats(job) {
   for (const c of calls) { byStage[c.stage] = byStage[c.stage] || { tokens: 0, cost: 0, requests: 0 }; byStage[c.stage].tokens += tok(c); byStage[c.stage].cost += c.cost_usd; byStage[c.stage].requests += c.requests; }
   const evaluation = (byStage.judge || {}).tokens || 0;
   const backforth = ((byStage.refine || {}).tokens || 0) + ((byStage.escalate || {}).tokens || 0) + ((byStage.redo || {}).tokens || 0);
-  const pages = r.pages.map((p) => ({ label: String(p.page), parts: {} }));
-  for (const c of calls) { if (c.page && pages[c.page - 1]) pages[c.page - 1].parts[c.stage] = (pages[c.page - 1].parts[c.stage] || 0) + tok(c); }
+  const add = (acc, c) => {
+    acc.tokens += tok(c); acc.cost += c.cost_usd; acc.requests += c.requests; acc.seconds += c.seconds;
+    acc.input += c.input_tokens; acc.output += c.output_tokens;
+    return acc;
+  };
+  const empty = () => ({ tokens: 0, cost: 0, requests: 0, seconds: 0, input: 0, output: 0 });
+  const stages = {};
+  for (const c of calls) add((stages[c.stage] = stages[c.stage] || { key: c.stage, ...empty() }), c);
+  const pages = r.pages.map((p) => ({ page: p.page, parts: {} }));
+  for (const c of calls) {
+    const pg = c.page && pages[c.page - 1];
+    if (pg) add((pg.parts[c.stage] = pg.parts[c.stage] || empty()), c);
+  }
   const byAgent = {};
   for (const c of calls) { const k = `${c.agent}|${c.model}`; byAgent[k] = byAgent[k] || { requests: 0, in: 0, out: 0, cost: 0, s: 0 }; const a = byAgent[k]; a.requests += c.requests; a.in += c.input_tokens; a.out += c.output_tokens; a.cost += c.cost_usd; a.s += c.seconds; }
   const g = res.glyphs || {}, fonts = Object.entries(g.fonts || {});
@@ -372,11 +383,15 @@ function renderStats(job) {
       <div class="stat"><b>${g.glyphs_built || 0}</b><span>glyphs built · ${(g.ms || 0).toFixed(0)} ms · 0 tokens</span></div>
       <div class="stat"><b>${(r.timings.total || 0).toFixed(0)} s</b><span>total time</span></div>
     </div>
-    <h3>Tokens by stage</h3>
-    ${Charts.stacked(Object.entries(byStage).map(([k, v]) => ({ label: k, parts: { [k]: v.tokens } })))}
-    <h3>Tokens per page</h3>
-    ${pages.length ? Charts.columns(pages) : ""}
-    <p class="muted">Document-level calls (analysis) are not attributed to a page.</p>
+    <div class="metric-bar"><span class="muted">Show</span>
+      ${Object.entries({ tokens: "Tokens", cost: "Cost", requests: "Requests", seconds: "Time" }).map(([k, v]) =>
+        `<button type="button" class="subtab ${k === state.statsMetric ? "active" : ""}" data-metric="${k}">${v}</button>`).join("")}
+      <span class="muted">· hover a bar for the numbers</span></div>
+    <h3>By stage</h3>
+    <div class="chart-box"><canvas id="chart-stages"></canvas></div>
+    <h3>Per page</h3>
+    ${pages.length ? `<div class="chart-box tall"><canvas id="chart-pages"></canvas></div>` : ""}
+    <p class="muted">Click a page to open it in Preview. Document-level calls (analysis) are not attributed to a page.</p>
     <h3>Agents and models</h3>
     <table><tr><th>Agent</th><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cost</th><th>Time</th></tr>
       ${Object.entries(byAgent).map(([k, a]) => { const [agent, model] = k.split("|"); return `<tr><td>${esc(agent)}</td><td>${esc(model)}</td><td>${a.requests}</td><td>${fmtTokens(a.in)}</td><td>${fmtTokens(a.out)}</td><td>${fmtUsd(a.cost)}</td><td>${a.s.toFixed(1)} s</td></tr>`; }).join("")}
@@ -388,9 +403,34 @@ function renderStats(job) {
       <tr><td>Extraction / OCR</td><td>${r.pages.filter((p) => p.ocr).length} scanned page(s)</td><td>${(r.timings.extract || 0).toFixed(1)} s</td></tr>
       <tr><td>Render</td><td>${r.blocks_total} blocks</td><td>${(r.timings.render || 0).toFixed(1)} s</td></tr>
       <tr><td>Review preparation</td><td>similar-font ranking</td><td>${(res.counters.review_s || 0).toFixed(1)} s</td></tr></table>
-    <h3>Timeline</h3>${Charts.timeline(timeline)}
-    ${versions.length > 1 ? `<h3>Versions</h3><table><tr><th>Version</th><th>Score</th><th>Tokens</th><th>Cost</th></tr>${versions.map((v) => `<tr><td>v${v.version}</td><td>${Math.round(v.score)}</td><td>${fmtTokens(v.tokens)}</td><td>${fmtUsd(v.cost_usd)}</td></tr>`).join("")}<tr class="total"><td>All versions</td><td></td><td>${fmtTokens(sum(versions, (v) => v.tokens))}</td><td>${fmtUsd(sum(versions, (v) => v.cost_usd))}</td></tr></table>` : ""}
+    <h3>Timeline</h3><div class="chart-box"><canvas id="chart-timeline"></canvas></div>
+    ${versions.length > 1 ? `<h3>Versions</h3><div class="chart-box"><canvas id="chart-versions"></canvas></div><table><tr><th>Version</th><th>Score</th><th>Tokens</th><th>Cost</th></tr>${versions.map((v) => `<tr><td>v${v.version}</td><td>${Math.round(v.score)}</td><td>${fmtTokens(v.tokens)}</td><td>${fmtUsd(v.cost_usd)}</td></tr>`).join("")}<tr class="total"><td>All versions</td><td></td><td>${fmtTokens(sum(versions, (v) => v.tokens))}</td><td>${fmtUsd(sum(versions, (v) => v.cost_usd))}</td></tr></table>` : ""}
     <p class="muted">${r.backend === "openai" ? "The full trace is also in the OpenAI dashboard (Traces), grouped by job id." : "Demo mode: token counts are estimated by the local pseudo model."}</p>`;
+  state.statsData = { stages: Object.values(stages), pages, timeline, versions };
+  $$("#stats [data-metric]").forEach((b) => (b.onclick = () => {
+    state.statsMetric = b.dataset.metric;
+    $$("#stats [data-metric]").forEach((x) => x.classList.toggle("active", x === b));
+    drawStats();
+  }));
+  drawStats();
+}
+
+function drawStats() {
+  const d = state.statsData;
+  if (!d || $("#stats").closest(".tab-body[hidden]")) return; // drawn when the tab becomes visible
+  const metric = state.statsMetric;
+  const box = $("#chart-stages") && $("#chart-stages").parentElement;
+  if (box) box.style.height = `${Math.max(90, d.stages.length * 34 + 30)}px`; // one row per stage
+  Charts.byStage("chart-stages", d.stages, metric);
+  if (d.pages.length) Charts.perPage("chart-pages", d.pages, metric, (page) => {
+    state.page = page;
+    openTab("main", "preview");
+    $(".tabs").scrollIntoView({ block: "start", behavior: "smooth" });
+  });
+  const tl = $("#chart-timeline") && $("#chart-timeline").parentElement;
+  if (tl) tl.style.height = `${Math.max(90, d.timeline.length * 30 + 50)}px`;
+  Charts.timeline("chart-timeline", d.timeline);
+  if (d.versions.length > 1) Charts.versions("chart-versions", d.versions);
 }
 
 // ------------------------------------------------------------------ run log
