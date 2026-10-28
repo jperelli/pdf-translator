@@ -1,0 +1,57 @@
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app) as c:
+        yield c
+
+
+def wait(client, job_id, timeout=60):
+    end = time.time() + timeout
+    while time.time() < end:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("done", "error"):
+            return job
+        time.sleep(0.2)
+    raise AssertionError("job did not finish")
+
+
+def test_config_and_samples(client):
+    cfg = client.get("/api/config").json()
+    assert cfg["backend"] == "pseudo" and any(lang["code"] == "ar" for lang in cfg["languages"])
+    assert any(s["name"].startswith("09-stark") for s in client.get("/api/samples").json())
+
+
+@pytest.mark.parametrize("name,msg", [("not-a-pdf.pdf", "Unsupported file type"), ("encrypted.pdf", "password")])
+def test_invalid_uploads(client, samples, name, msg):
+    r = client.post("/api/jobs", data={"target": "es"}, files={"file": (name, (samples / "invalid" / name).read_bytes())})
+    assert r.status_code == 422 and msg in r.json()["error"]
+
+
+def test_bad_requests(client):
+    assert client.post("/api/jobs", data={"target": "xx", "sample": "01-simple-en.pdf"}).status_code == 422
+    assert client.post("/api/jobs", data={"target": "es", "sample": "../../etc/passwd"}).status_code == 404
+    assert client.post("/api/jobs", data={"target": "es"}).status_code == 422
+    assert client.get("/api/jobs/not-a-job").status_code == 404
+
+
+def test_full_job(client):
+    r = client.post("/api/jobs", data={"target": "de", "sample": "01-simple-en.pdf"})
+    assert r.status_code == 202
+    job = wait(client, r.json()["id"])
+    assert job["status"] == "done", job["error"]
+    jid = job["id"]
+    pdf = client.get(f"/api/jobs/{jid}/download")
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    png = client.get(f"/api/jobs/{jid}/pages/1.png?version=translated")
+    assert png.headers["content-type"] == "image/png"
+    events = client.get(f"/api/jobs/{jid}/events").text
+    for kind in ('"type": "analysis"', '"type": "page"', '"span": "agent"', '"type": "done"'):
+        assert kind in events
+    assert "event: end" in events

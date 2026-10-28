@@ -1,0 +1,31 @@
+# Coolify: Application from this Git repository, Build pack "Docker Compose",
+# Docker Compose Location "/docker-compose.coolify.yml".
+# No published ports: Coolify's proxy routes the generated (or your own) domain to port 8000.
+services:
+  app:
+    build: .
+    environment:
+      SERVICE_URL_APP_8000: /
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?}
+      LLM_BACKEND: ${LLM_BACKEND:-openai}
+      TRANSLATOR_MODEL: ${TRANSLATOR_MODEL:-gpt-5.4-mini}
+      ANALYST_MODEL: ${ANALYST_MODEL:-gpt-5.4-mini}
+      JUDGE_MODEL: ${JUDGE_MODEL:-gpt-5.4}
+      ESCALATION_MODEL: ${ESCALATION_MODEL:-gpt-5.5}
+      QUALITY_THRESHOLD: ${QUALITY_THRESHOLD:-85}
+      MAX_REFINE_ITERATIONS: ${MAX_REFINE_ITERATIONS:-2}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
+      MAX_PAGES: ${MAX_PAGES:-60}
+      OPENAI_TRACING: ${OPENAI_TRACING:-true}
+    volumes:
+      - translator-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  translator-data:

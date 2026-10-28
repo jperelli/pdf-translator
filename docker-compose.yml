@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    image: stark-pdf-translator
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Without a key the app runs in demo mode (local pseudo-translation, no tokens).
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_BACKEND: ${LLM_BACKEND:-auto}
+      TRANSLATOR_MODEL: ${TRANSLATOR_MODEL:-gpt-5.4-mini}
+      ANALYST_MODEL: ${ANALYST_MODEL:-gpt-5.4-mini}
+      JUDGE_MODEL: ${JUDGE_MODEL:-gpt-5.4}
+      ESCALATION_MODEL: ${ESCALATION_MODEL:-gpt-5.5}
+      QUALITY_THRESHOLD: ${QUALITY_THRESHOLD:-85}
+      MAX_REFINE_ITERATIONS: ${MAX_REFINE_ITERATIONS:-2}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
+      MAX_PAGES: ${MAX_PAGES:-60}
+    volumes:
+      - translator-data:/data
+    restart: unless-stopped
+
+volumes:
+  translator-data:

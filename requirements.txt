@@ -1,0 +1,9 @@
+# Runtime. Pinned to releases at least a week old.
+fastapi==0.156.4
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+pydantic==2.14.1
+pydantic-settings==2.16.1
+openai-agents==0.24.0
+openai==3.35.1
+pymupdf==2.0
