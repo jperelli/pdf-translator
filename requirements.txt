@@ -8,3 +8,4 @@ openai-agents==0.24.0
 openai==3.35.1
 pymupdf==2.0
 fonttools==4.67.0
+huey==3.4.0

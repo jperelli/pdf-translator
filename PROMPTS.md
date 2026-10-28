@@ -162,6 +162,35 @@ purpose.
 - The real CV PDF was not available in the sandbox (only a screenshot), so a synthetic `10-cv-like-en`
   reproduces its structure. The anonymised real CV is pending.
 
+### 1.6 Observability and job queue research, then a Huey queue
+
+> ok, now i want observability into all of this. Lets research alternatives: Can we use grafana and store all
+> tempo spans for this? also what can we use to store errors? [...] and for ui usage/screen recording?
+
+> what alternatives are there as queues for this, so that each pdf conversion goes into a job in a queue? it
+> should be one that we can get the progress from and we could keep it simple with sqlite as backend. Also for
+> event communication between app and queue can we use the same sqlite? [...]
+
+> i think huey would be the best. I'd directly use the events table [...]
+
+> si, implementalo
+
+**Result:** two research notes with primary sources (`docs/research-observability.md`,
+`docs/research-job-queue.md`), then the queue: `SqliteHuey` tasks run by `huey_consumer` process workers, all
+progress written to an `events` table, and the SSE endpoint tailing it, checking `PRAGMA data_version` before
+each query.
+
+**What went wrong on the way:**
+- The first lost-worker detection used a heartbeat thread. The test that kills a worker mid-render showed the
+  retry being declared dead too: a single MuPDF call held the GIL for 47 s (measured), so a live worker
+  looked dead. Detection now checks whether the worker process (host, pid, start time) still exists; the
+  heartbeat is only a fallback.
+- Huey's process workers did not shut down on SIGTERM with the default signal settings (exceptions in the
+  workers, consumer left hanging), which would have made every container stop wait for Docker's kill.
+  Fixed with `--graceful-signal TERM --shutdown-timeout 5`.
+- `UPDATE ... RETURNING` in autocommit mode keeps the statement, and the write lock, open until the cursor is
+  fully read: the claim uses `fetchall()`.
+
 ---
 
 ## 2. Runtime prompts

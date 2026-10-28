@@ -65,7 +65,9 @@ def _safe_name(name: str | None) -> str:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    from app.worker import huey
+
+    return {"status": "ok", "queue": {"pending": huey.pending_count()}}
 
 
 @app.get("/api/config")
@@ -122,32 +124,27 @@ async def create_job(request: Request, target: str = Form(...), file: UploadFile
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(422, "The file is not a readable PDF (it may be corrupted or truncated).") from exc
-    job = request.app.state.jobs.create(name, target, data, purpose)
+    job = await request.app.state.jobs.create(name, target, data, purpose)
     return job.summary()
 
 
 @app.get("/api/jobs")
 def list_jobs(request: Request, limit: int = 50, offset: int = 0):
     rows, total = request.app.state.jobs.db.list_jobs(max(1, min(limit, 200)), max(0, offset))
-    live = request.app.state.jobs.jobs
-    for r in rows:  # live status wins over the persisted one while a job runs
-        if r["id"] in live:
-            r["status"] = live[r["id"]].status
     return {"jobs": rows, "total": total}
 
 
 @app.get("/api/jobs/{job_id}")
 def get_job(request: Request, job_id: str, version: int | None = None):
     job = _job(request, job_id)
-    versions = request.app.state.jobs.db.list_versions(job_id)
-    result, events = job.result, job.events
-    if version is not None and version != job.version:
-        v = request.app.state.jobs.db.version(job_id, version)
-        if not v:
-            raise HTTPException(404, "No such version.")
-        result, events = v["result"], v["events"]
-    return {**job.summary(), "result": result, "versions": versions, "events": events,
-            "shown_version": version or job.version}
+    jobs = request.app.state.jobs
+    if version is None:  # the newest finished version; while a redo runs (or after it failed) the previous one
+        version = job.result_version if job.result and job.status != "done" else job.version
+    v = jobs.db.version(job_id, version)
+    if not v:
+        raise HTTPException(404, "No such version.")
+    return {**job.summary(), "result": v["result"], "versions": jobs.db.list_versions(job_id),
+            "events": v["events"], "shown_version": version}
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -187,7 +184,7 @@ async def redo(request: Request, job_id: str):
     if not isinstance(decisions, dict):
         raise HTTPException(422, "Decisions must be a JSON object.")
     try:
-        request.app.state.jobs.redo(job, decisions)
+        job = await request.app.state.jobs.redo(job, decisions)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return job.summary()
@@ -195,29 +192,12 @@ async def redo(request: Request, job_id: str):
 
 @app.get("/api/jobs/{job_id}/events")
 async def job_events(request: Request, job_id: str):
-    job = _job(request, job_id)
-    queue: asyncio.Queue = asyncio.Queue()
-    history = list(job.events)
-    finished = job.status in ("done", "error")
-    if not finished:
-        job.listeners.add(queue)
+    _job(request, job_id)
 
     async def stream():
-        try:
-            for event in history:
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            while not finished:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-                if event is None:
-                    break
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            yield "event: end\ndata: {}\n\n"
-        finally:
-            job.listeners.discard(queue)
+        async for event in request.app.state.jobs.stream(job_id):
+            yield ": keep-alive\n\n" if event is None else f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        yield "event: end\ndata: {}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

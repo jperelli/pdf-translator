@@ -16,6 +16,7 @@ services:
       MAX_REFINE_ITERATIONS: ${MAX_REFINE_ITERATIONS:-2}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
       MAX_PAGES: ${MAX_PAGES:-60}
+      WORKERS: ${WORKERS:-2}
     volumes:
       - translator-data:/data
     restart: unless-stopped

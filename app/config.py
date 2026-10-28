@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     job_ttl_hours: int = 24
     openai_tracing: bool = True
 
+    # Job queue (Huey on SQLite). Immediate mode runs a task inside the caller: tests and single-process dev.
+    queue_immediate: bool = False
+    worker_heartbeat_s: float = 15
+    stale_after_s: float = 180  # a running job without a heartbeat for this long lost its worker
+    max_attempts: int = 2  # first run + one automatic retry after a lost worker
+
     def price(self, model: str) -> tuple[float, float]:
         table = {**PRICES, **{k: tuple(v) for k, v in (json.loads(self.model_prices) if self.model_prices else {}).items()}}
         return table.get(model, (0.0, 0.0))

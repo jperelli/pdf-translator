@@ -106,6 +106,38 @@ the document, translating, reviewing, revising. Everything that can be measured 
 
 All models are env vars (`.env.example`). Cheap while building, expensive only where quality is decided.
 
+### Jobs: a Huey queue on SQLite
+
+Each translation, and each redo from the Review tab, is a task in a **Huey** queue stored in SQLite
+(`/data/queue.sqlite3`). Workers are separate processes, so the web server never runs PDF or LLM work.
+
+```mermaid
+flowchart LR
+  B[Browser] -- upload / redo --> W[FastAPI]
+  W -- enqueue job id, version, attempt --> Q[(Huey queue<br/>queue.sqlite3)]
+  Q --> K1[worker process 1]
+  Q --> K2[worker process 2]
+  K1 & K2 -- events, result, status --> D[(translator.sqlite3<br/>jobs · versions · events)]
+  W -- SSE: new events since last id --> B
+  D -. PRAGMA data_version .-> W
+```
+
+- **Progress lives in our `events` table, not in Huey.** The pipeline writes every event (stage, page, refine,
+  agent span...) as a row. The SSE endpoint keeps a cursor and only queries when `PRAGMA data_version` says
+  another connection committed, so near-real-time progress costs almost nothing. The same rows are the
+  Log tab and the history: there is no separate "save the log" step.
+- **A task is a plain function** (Huey is synchronous) that runs the async pipeline with `asyncio.run()`.
+  Inside the job everything stays concurrent: pages in parallel, overlapping LLM calls. Each task creates its
+  own OpenAI client, because an async client belongs to the event loop that created it.
+- **Lost workers.** A job remembers which worker process runs it (host, pid and the process start time from
+  `/proc`). A periodic task requeues jobs whose worker no longer exists (crash, OOM, redeploy) as a new attempt,
+  once; a second loss fails the job. Each attempt has its own events and a stale attempt cannot overwrite a
+  newer one. A heartbeat thread exists as a fallback for workers on another host.
+  - Why not just the heartbeat: a single MuPDF call can hold the GIL for most of a minute (measured: 47 s when
+    rendering the Chinese manual), so a live worker's heartbeat thread stalls and it looks dead.
+- `scripts/start.sh` runs `huey_consumer` (`WORKERS` processes, default 2) and uvicorn in one container. If either
+  exits, the container exits and Docker's restart policy brings both back; interrupted jobs are then retried.
+
 ### Agents SDK features used
 
 - **Structured outputs** (`output_type`, Pydantic, strict JSON schema) for every agent.
@@ -244,8 +276,11 @@ Chinese (logographic, no spaces, contraction, CJK fonts), Spanish (lets a Spanis
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # + apt install tesseract-ocr
-.venv/bin/uvicorn app.main:app --reload            # uses .env
-.venv/bin/python -m pytest                         # 30+ tests, no network (pseudo model)
+scripts/start.sh                                   # web + queue workers, uses .env (or run the two below)
+.venv/bin/uvicorn app.main:app --reload            # web only...
+.venv/bin/huey_consumer app.worker.huey -k process -w 2   # ...plus the workers
+QUEUE_IMMEDIATE=1 .venv/bin/uvicorn app.main:app   # single process: each job runs inside its request
+.venv/bin/python -m pytest                         # 50+ tests, no network (pseudo model, immediate queue)
 .venv/bin/python -m evals.run                      # whole corpus, pseudo, zero tokens
 .venv/bin/python -m evals.run --backend openai --samples 02 08 --targets de es
 ```
@@ -272,14 +307,17 @@ instance is deployed).
 
 See `.env.example`. The main knobs: models per agent, `REASONING_EFFORT`, `QUALITY_THRESHOLD`,
 `MAX_REFINE_ITERATIONS`, `ENABLE_JUDGE`, `ENABLE_ESCALATION`, `MAX_CONCURRENT_PAGES`, `MIN_FONT_SCALE`,
-`MAX_UPLOAD_MB`, `MAX_PAGES`, `OCR_LANGUAGE`, `OPENAI_TRACING`.
+`MAX_UPLOAD_MB`, `MAX_PAGES`, `OCR_LANGUAGE`, `OPENAI_TRACING`. Queue: `WORKERS` (translations at the same
+time), `WORKER_MAX_TASKS` (recycle a worker process after N jobs), `QUEUE_IMMEDIATE`, `STALE_AFTER_S`,
+`MAX_ATTEMPTS`.
 
 ## Project layout
 
 ```
 app/
   main.py               FastAPI: upload, jobs, SSE events, download, page previews, static UI
-  jobs.py               background jobs and versions, event fan-out, TTL cleanup
+  jobs.py               web side of the jobs: enqueue, read status/results, stream events, TTL cleanup
+  worker.py             Huey tasks: run a job, lost-worker recovery
   store.py              SQLite persistence (jobs, versions, events, decisions)
   pipeline.py           orchestration + evaluator-optimizer loop + layout rounds + redo + report
   review.py             review items, decisions, transliteration, token estimate
@@ -296,6 +334,7 @@ app/
   quality/checks.py     deterministic text checks and MQM-style scoring
   quality/layout.py     collisions, font fallbacks, read-back of the written PDF
   static/               UI (no build step)
+scripts/start.sh        container entry point: queue workers + web
 evals/run.py            offline eval harness
 samples/                test corpus + generator
 tests/                  pytest
@@ -311,6 +350,8 @@ tests/                  pytest
 - Accents are built only when the font has the base letter and a mark (or a period for a dieresis); CID
   subsets without a Unicode map cannot be reused at all and fall back to the closest generic family.
 - Token usage of agent calls that fail and are retried is not counted in Stats (the provider still bills it).
-- Jobs live in one process (in-memory registry + files on `/data`); horizontal scaling needs a queue.
+- The queue, database and files share one `/data` volume: workers scale up on one host (`WORKERS`), not across
+  hosts. That would need a network database and shared storage (Huey also supports Redis and Postgres).
+- A retried job starts over from page 1 and pays its tokens again (no per-page checkpoints yet).
 - Term decisions (keep jargon in the original language, translate a "protected" word) are taken in Review,
   after the first pass, not before translating.

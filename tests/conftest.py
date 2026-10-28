@@ -6,6 +6,7 @@ from pathlib import Path
 # Tests never call OpenAI: force the local pseudo model before anything reads the settings.
 os.environ["LLM_BACKEND"] = "pseudo"
 os.environ["OPENAI_API_KEY"] = ""
+os.environ["QUEUE_IMMEDIATE"] = "1"  # Huey runs each task inside the request: no consumer needed
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="pdf-translator-tests-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
