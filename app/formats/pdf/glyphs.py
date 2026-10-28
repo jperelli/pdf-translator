@@ -4,7 +4,8 @@ PDF fonts are usually subsets: they list characters whose outlines were stripped
 pointing at empty glyphs, and miss the accented letters of the target language. For each embedded font we:
 
 1. read every glyph outline (TrueType, OpenType/CFF or bare CFF) and keep only the characters that really
-   have an outline (exact coverage, no guessing by rendering);
+   have an outline (exact coverage, no guessing by rendering). Subsets written by browsers often have no
+   Unicode cmap at all (only codes 1..n): the letters then come from the PDF's ToUnicode map;
 2. build missing accented letters from pieces of the same font: base letter + mark (Ä = A + dieresis); when
    the font has no dieresis, two of its own periods are used;
 3. write a plain TrueType font without GSUB, so no ligature can map to an empty glyph.
@@ -13,6 +14,7 @@ pointing at empty glyphs, and miss the accented letters of the target language. 
 from __future__ import annotations
 
 import io
+import logging
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -21,12 +23,15 @@ from fontTools.agl import toUnicode
 from fontTools.cffLib import CFFFontSet
 from fontTools.fontBuilder import FontBuilder
 from fontTools.misc.psCharStrings import T2WidthExtractor
+from fontTools.pens.basePen import BasePen
 from fontTools.pens.boundsPen import ControlBoundsPen
 from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.recordingPen import DecomposingRecordingPen, RecordingPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
+
+logging.getLogger("fontTools.ttLib.tables._h_e_a_d").setLevel(logging.ERROR)  # "timestamp seems very low"
 
 # combining mark -> spacing glyph names that can serve as the mark (first one present wins)
 MARKS = {
@@ -76,9 +81,10 @@ class RebuiltFont:
     # ------------------------------------------------------------------ loading
 
     @classmethod
-    def from_pdf_font(cls, name: str, buf: bytes) -> "RebuiltFont | None":
+    def from_pdf_font(cls, name: str, buf: bytes, to_unicode: dict[int, str] | None = None) -> "RebuiltFont | None":
+        """`to_unicode`: the PDF's character code -> text map, used when the font itself has no Unicode cmap."""
         try:
-            return cls._from_sfnt(name, buf)
+            return cls._from_sfnt(name, buf, to_unicode)
         except Exception:
             pass
         try:
@@ -87,7 +93,7 @@ class RebuiltFont:
             return None
 
     @classmethod
-    def _from_sfnt(cls, name: str, buf: bytes) -> "RebuiltFont":
+    def _from_sfnt(cls, name: str, buf: bytes, to_unicode: dict[int, str] | None = None) -> "RebuiltFont":
         f = TTFont(io.BytesIO(buf), lazy=False)
         gs = f.getGlyphSet()
         cubic = "CFF " in f
@@ -103,9 +109,17 @@ class RebuiltFont:
         hhea = f["hhea"] if "hhea" in f else None
         ascent = hhea.ascent if hhea else int(upm * 0.8)
         descent = hhea.descent if hhea else -int(upm * 0.2)
-        cmap = {}
-        for cp, g in (f.getBestCmap() or {}).items():
-            cmap[cp] = g
+        cmap = dict(f.getBestCmap() or {})
+        if not cmap and to_unicode:  # code -> glyph from the font's own (non-Unicode) cmap, code -> text from PDF
+            codes: dict[int, str] = {}
+            for table in (f["cmap"].tables if "cmap" in f else []):
+                for code, g in table.cmap.items():  # (3,0) symbol cmaps put simple-font codes at 0xF000 + code
+                    codes.setdefault(code - 0xF000 if 0xF000 <= code <= 0xF0FF else code, g)
+            order = f.getGlyphOrder()
+            for code, text in to_unicode.items():
+                g = codes.get(code) if codes else (order[code] if code < len(order) else None)  # CID = GID
+                if g in glyphs and len(text) == 1:
+                    cmap.setdefault(ord(text), g)
         if not cmap:  # symbolic subset without a usable cmap: fall back to glyph names
             cmap = {cp: g for g in glyphs if (cp := _cp(g)) is not None}
         return cls._finish(name, upm, ascent, descent, glyphs, cmap)
@@ -149,6 +163,22 @@ class RebuiltFont:
             self.glyphs[name] = other.glyphs[g]
             self.cmap[cp] = name
         self._bytes = None
+
+    def generic(self) -> str | None:
+        """'serif', 'sans-serif' or 'monospace', measured on the outlines. PDF font flags are unreliable:
+        browser subsets are flagged "symbolic" and MuPDF then reports them as serif."""
+        i, m = self._glyph_for("i"), self._glyph_for("m")
+        if i and m and i.width and abs(i.width - m.width) < 0.02 * self.upm:
+            return "monospace"
+        for ch, mid in (("I", 0.5), ("H", 0.25), ("E", 0.25), ("L", 0.5), ("T", 0.5)):
+            g = self._glyph_for(ch)
+            if not g or not g.bounds:
+                continue
+            _, y0, _, y1 = g.bounds
+            low, high = _ink_width(g, y0 + 0.04 * (y1 - y0)), _ink_width(g, y0 + mid * (y1 - y0))
+            if low and high:
+                return "serif" if low > 1.3 * high else "sans-serif"
+        return None
 
     # ------------------------------------------------------------------ coverage / building
 
@@ -269,6 +299,78 @@ class RebuiltFont:
         fb.save(out)
         self._bytes = out.getvalue()
         return self._bytes
+
+
+class _PolyPen(BasePen):
+    """Flattens an outline into polygons (curves sampled), to measure ink widths."""
+
+    def __init__(self):
+        super().__init__(None)
+        self.contours: list[list[tuple[float, float]]] = []
+
+    def _moveTo(self, p):
+        self.contours.append([p])
+
+    def _lineTo(self, p):
+        self.contours[-1].append(p)
+
+    def _curveToOne(self, p1, p2, p3):
+        p0 = self.contours[-1][-1]
+        for k in range(1, 9):
+            t = k / 8
+            a, b, c, d = (1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3
+            self.contours[-1].append((a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+                                      a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1]))
+
+    def _qCurveToOne(self, p1, p2):
+        p0 = self.contours[-1][-1]
+        for k in range(1, 9):
+            t = k / 8
+            a, b, c = (1 - t) ** 2, 2 * t * (1 - t), t * t
+            self.contours[-1].append((a * p0[0] + b * p1[0] + c * p2[0], a * p0[1] + b * p1[1] + c * p2[1]))
+
+
+def _ink_width(glyph: Glyph, y: float) -> float:
+    """Total width of ink on the horizontal line at height y (even-odd spans)."""
+    pen = _PolyPen()
+    glyph.pen.replay(pen)
+    xs = []
+    for pts in pen.contours:
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+            if (y1 <= y < y2) or (y2 <= y < y1):
+                xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+    xs.sort()
+    return sum(b - a for a, b in zip(xs[::2], xs[1::2]))
+
+
+def parse_to_unicode(data: bytes) -> dict[int, str]:
+    """A PDF ToUnicode CMap: character code -> text (bfchar and bfrange sections)."""
+    import re
+
+    text = data.decode("latin-1")
+
+    def utf16(h: str) -> str:
+        try:
+            return bytes.fromhex(h).decode("utf-16-be")
+        except (ValueError, UnicodeDecodeError):
+            return ""
+
+    out: dict[int, str] = {}
+    for block in re.findall(r"beginbfchar(.*?)endbfchar", text, re.S):
+        for src, dst in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>", block):
+            out[int(src, 16)] = utf16(dst)
+    for block in re.findall(r"beginbfrange(.*?)endbfrange", text, re.S):
+        for lo, hi, rest in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(\[[^\]]*\]|<[0-9A-Fa-f]+>)", block):
+            lo, hi = int(lo, 16), int(hi, 16)
+            if rest.startswith("["):
+                for k, dst in enumerate(re.findall(r"<([0-9A-Fa-f]*)>", rest)):
+                    out[lo + k] = utf16(dst)
+            else:
+                start = bytes.fromhex(rest[1:-1])
+                for k in range(min(hi - lo + 1, 65536)):
+                    v = int.from_bytes(start, "big") + k
+                    out[lo + k] = utf16(v.to_bytes(len(start), "big").hex())
+    return {k: v for k, v in out.items() if v}
 
 
 def _cp(glyph_name: str) -> int | None:

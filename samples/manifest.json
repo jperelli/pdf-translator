@@ -80,6 +80,14 @@
     ],
     "pages": 1
   },
+  "12-subset-unicode-en.pdf": {
+    "description": "Sans fonts embedded by a browser as TrueType subsets whose letters are only in ToUnicode, flagged symbolic: the font must be reused, completed, and never replaced by a serif.",
+    "targets": [
+      "de",
+      "es"
+    ],
+    "pages": 1
+  },
   "09-stark-varg-manual-20p.pdf": {
     "description": "First 20 pages of the real Stark VARG Owner's Manual (InDesign, subset fonts, photos, TOC with tab leaders, warnings). The final boss.",
     "targets": [

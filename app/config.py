@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     job_ttl_hours: int = 24
     openai_tracing: bool = True
+    # complete an embedded subset with the full font of its own family from Google Fonts (cached on /data)
+    font_downloads: bool = True
 
     # Job queue (Huey on SQLite). Immediate mode runs a task inside the caller: tests and single-process dev.
     queue_immediate: bool = False

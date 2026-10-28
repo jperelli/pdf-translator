@@ -41,6 +41,57 @@ SAMPLE = "HOxnaeiostrEAIRNSdl"
 GOOD_ENOUGH = 0.12
 
 
+WEIGHTS = {"thin": 100, "hairline": 100, "extralight": 200, "ultralight": 200, "light": 300, "regular": 400,
+           "book": 400, "normal": 400, "roman": 400, "medium": 500, "semibold": 600, "demibold": 600, "bold": 700,
+           "extrabold": 800, "ultrabold": 800, "black": 900, "heavy": 900}
+_UNAVAILABLE: set[str] = set()  # families Google Fonts does not have (asked once per process)
+
+
+def parse_font_name(name: str) -> tuple[str, int, bool]:
+    """'UbuntuSans-SemiBoldItalic' -> ('Ubuntu Sans', 600, True); 'Ubuntu-Regular' -> ('Ubuntu', 400, False)."""
+    fam, _, style = re.sub(r",", "-", name).partition("-")
+    words = fam.split()
+    while len(words) > 1 and (words[-1].lower() in WEIGHTS or words[-1].lower() in ("italic", "oblique")):
+        style = words.pop() + style  # "Ubuntu Regular", "Open Sans Bold Italic"
+    fam = " ".join(words)
+    fam = re.sub(r"(MT|PS|Std|Pro)$", "", fam)
+    fam = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", fam).strip()
+    s = style.lower().replace(" ", "")
+    italic = "italic" in s or "oblique" in s
+    s = s.replace("italic", "").replace("oblique", "")
+    weight = next((w for k, w in sorted(WEIGHTS.items(), key=lambda kv: -len(kv[0])) if k in s), 400)
+    return fam, weight, italic
+
+
+def same_family(font: str, cache: Path | None, downloads: bool) -> tuple[str, Path] | None:
+    """The complete font of `font`'s own family and weight: bundled first, then Google Fonts (cached)."""
+    family, weight, italic = parse_font_name(font)
+    if not family:
+        return None
+    key = family.replace(" ", "")
+    bundled = FONT_DIR / f"{key}-{weight}.ttf"
+    if not italic and bundled.is_file():
+        return f"{family} {weight} (bundled)", bundled
+    if not downloads or cache is None or family in _UNAVAILABLE:
+        return None
+    dest = cache / f"{key}-{weight}{'i' if italic else ''}.ttf"
+    if not dest.exists():
+        url = ("https://fonts.googleapis.com/css2?family=" + urllib.parse.quote(family) +
+               f":ital,wght@{int(italic)},{weight}")
+        try:
+            css = urllib.request.urlopen(url, timeout=10).read().decode()
+            src = re.search(r"src: url\((\S+?\.ttf)\)", css)
+            if not src:
+                raise ValueError("no TrueType source")
+            cache.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(urllib.request.urlopen(src.group(1), timeout=20).read())
+        except Exception as exc:  # 400 = not a Google Fonts family; offline: keep the fallback
+            log.info("same-family font for %s (%s %s) unavailable: %s", font, family, weight, exc)
+            _UNAVAILABLE.add(family)
+            return None
+    return f"{family} {weight}{' italic' if italic else ''} (Google Fonts)", dest
+
+
 def css_url(family: str, weights: list[int]) -> str:
     return "https://fonts.googleapis.com/css2?family=" + urllib.parse.quote(family) + ":wght@" + \
         ";".join(map(str, weights))

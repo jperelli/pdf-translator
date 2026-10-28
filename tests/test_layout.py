@@ -131,3 +131,51 @@ def test_heading_font_fallback_is_reported(samples, tmp_path):
     info = doc.render({unit.id: "APÉNDICES"}, target, tmp_path / "o.pdf")
     cats = {i.category for i in info["layout_issues"][unit.id]}
     assert "font_substituted" in cats  # É cannot be built: the whole block uses a generic font, and says so
+
+
+def _out_fonts(path, page=0, containing=""):
+    return {s["font"] for b in pymupdf.open(path)[page].get_text("dict")["blocks"]
+            for ln in b.get("lines", []) for s in ln["spans"] if s["text"].strip() and containing in s["text"]}
+
+
+def test_browser_subset_font_is_reused(samples, tmp_path):
+    """Chrome-style TrueType subset: no Unicode cmap, letters only in ToUnicode. It must still be reused."""
+    doc = load(samples / "12-subset-unicode-en.pdf")
+    units = doc.units(0)
+    doc.prepare(get_language("en"))
+    assert doc.fonts.covers("Humanist-Regular", "Software engineer")
+    doc.render({u.id: u.text for u in units}, get_language("en"), tmp_path / "o.pdf")
+    fonts = _out_fonts(tmp_path / "o.pdf")
+    assert not any("Charis" in f or "Nimbus" in f for f in fonts), fonts
+
+
+def test_sans_font_never_falls_back_to_serif(samples, tmp_path):
+    doc = load(samples / "12-subset-unicode-en.pdf")
+    units = doc.units(0)
+    doc.prepare(get_language("de"))
+    body = next(u for u in units if u.style.font == "Humanist-Regular")
+    assert doc.fonts.generic("Humanist-Regular") == "sans-serif"  # measured on the outlines, not the PDF flags
+    doc.render({body.id: "Straße, Größe und Übermaß"}, get_language("de"), tmp_path / "o.pdf")
+    fonts = _out_fonts(tmp_path / "o.pdf", containing="Straße")
+    assert fonts and not any("Charis" in f for f in fonts), fonts
+
+
+def test_subset_is_completed_from_its_own_family(samples, tmp_path):
+    doc = load(samples / "12-subset-unicode-en.pdf")
+    units = doc.units(0)
+    doc.prepare(get_language("de"))
+    head = next(u for u in units if u.style.font == "OpenSans-Bold")
+    assert doc.fonts.stats()["fonts"]["OpenSans-Bold"]["substitute"] == "Open Sans 700 (bundled)"
+    doc.render({head.id: "Berufserfahrung für Größen"}, get_language("de"), tmp_path / "o.pdf")
+    fonts = _out_fonts(tmp_path / "o.pdf", containing="Größen")
+    assert len(fonts) == 1 and "OpenSans" in fonts.pop()  # one font, the same family: no per-letter fallback
+
+
+def test_font_names_map_to_their_family():
+    from app.formats.pdf.fontmatch import parse_font_name
+
+    assert parse_font_name("Ubuntu-Regular") == ("Ubuntu", 400, False)
+    assert parse_font_name("Ubuntu Regular") == ("Ubuntu", 400, False)
+    assert parse_font_name("UbuntuSans-SemiBoldItalic") == ("Ubuntu Sans", 600, True)
+    assert parse_font_name("Open Sans Bold Italic") == ("Open Sans", 700, True)
+    assert parse_font_name("ArialMT") == ("Arial", 400, False)

@@ -143,6 +143,7 @@ class TranslationPipeline:
         fmt = detect(filename, head)
         doc = await asyncio.to_thread(fmt.load, src, max_pages=self.s.max_pages, ocr_language=self.s.ocr_language,
                                       min_font_scale=self.s.min_font_scale)
+        self._configure_fonts(doc)
         try:
             return await self._translate_document(doc, out, target, t_start)
         finally:
@@ -195,6 +196,10 @@ class TranslationPipeline:
 
         return await self._finish(doc, pages, out, target, t0)
 
+    def _configure_fonts(self, doc) -> None:
+        if hasattr(doc, "font_downloads"):
+            doc.font_cache, doc.font_downloads = self.s.data_dir / "fonts", self.s.font_downloads
+
     async def _finish(self, doc, pages: list[list[TextUnit]], out: Path, target: Language, t0: float,
                       decisions: dict[str, Any] | None = None) -> dict[str, Any]:
         self.page_sizes = await asyncio.to_thread(doc.page_sizes)
@@ -206,7 +211,8 @@ class TranslationPipeline:
         self._apply_final_layout(render_info)
         report, blocks = self._report(pages, render_info)
         self._stage("review", "Preparing the review of what did not work", 97)
-        styles = {u.style.font: (u.style.family, u.style.bold) for units in pages for u in units}
+        styles = {u.style.font: ((doc.fonts.generic(u.style.font) if doc.fonts else None) or u.style.family,
+                                 u.style.bold) for units in pages for u in units}
         t = time.perf_counter()
         items = await asyncio.to_thread(build_items, blocks, self.analysis, doc.fonts, self.s.quality_threshold,
                                         self.purpose, self.s.data_dir / "fonts", styles)
@@ -232,6 +238,7 @@ class TranslationPipeline:
             fmt = detect(filename, src.read_bytes()[:2048])
             doc = await asyncio.to_thread(fmt.load, src, max_pages=self.s.max_pages,
                                           ocr_language=self.s.ocr_language, min_font_scale=self.s.min_font_scale)
+            self._configure_fonts(doc)
             try:
                 return await self._redo(doc, out, target, previous, decisions, t0)
             finally:

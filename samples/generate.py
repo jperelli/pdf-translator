@@ -353,6 +353,83 @@ def subset_heading_en() -> pymupdf.Document:
     return doc
 
 
+def _simple_truetype(doc: pymupdf.Document, ttf: Path, name: str, text: str) -> tuple[int, dict[str, int]]:
+    """Embed a subset of `ttf` the way Chrome/Skia "Save as PDF" does: a simple TrueType font whose own cmap
+    only maps codes 1..n to glyphs (no Unicode), the letters given by a ToUnicode CMap, and /Flags 4
+    (symbolic, so readers cannot tell serif from sans). Returns the font xref and char -> code."""
+    from fontTools import subset
+    from fontTools.ttLib import TTFont
+    from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
+
+    chars = sorted(set(text))
+    font = TTFont(ttf)
+    opts = subset.Options()
+    opts.drop_tables += ["GSUB", "GPOS", "GDEF", "OS/2", "post", "kern"]
+    opts.notdef_outline = True
+    sub = subset.Subsetter(opts)
+    sub.populate(unicodes=[ord(c) for c in chars])
+    sub.subset(font)
+    best = font.getBestCmap()
+    codes = {c: i + 1 for i, c in enumerate(chars)}
+    table = CmapSubtable.newSubtable(4)
+    table.platformID, table.platEncID, table.language = 1, 0, 0
+    table.cmap = {codes[c]: best[ord(c)] for c in chars}
+    font["cmap"].tables = [table]
+    buf = io.BytesIO()
+    font.save(buf)
+    upm = font["head"].unitsPerEm
+    widths = " ".join(str(round(font["hmtx"][best[ord(c)]][0] * 1000 / upm)) for c in chars)
+    to_unicode = ("/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Adobe-Identity-UCS def "
+                  "/CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange "
+                  f"{len(chars)} beginbfchar " + " ".join(f"<{codes[c]:02X}> <{ord(c):04X}>" for c in chars) +
+                  " endbfchar endcmap CMapName currentdict /CMap defineresource pop end end")
+    ff, tu, fd, fx = (doc.get_new_xref() for _ in range(4))
+    for xref in (ff, tu, fd, fx):
+        doc.update_object(xref, "<<>>")
+    doc.update_stream(ff, buf.getvalue())
+    doc.update_stream(tu, to_unicode.encode())
+    doc.update_object(fd, f"<< /Type /FontDescriptor /FontName /{name} /Flags 4 /FontBBox [-200 -250 1200 950] "
+                          f"/ItalicAngle 0 /Ascent 950 /Descent -250 /CapHeight 714 /StemV 80 /FontFile2 {ff} 0 R >>")
+    doc.update_object(fx, f"<< /Type /Font /Subtype /TrueType /BaseFont /{name} /FirstChar 1 "
+                          f"/LastChar {len(chars)} /Widths [{widths}] /FontDescriptor {fd} 0 R /ToUnicode {tu} 0 R >>")
+    return fx, codes
+
+
+def subset_unicode_en() -> pymupdf.Document:
+    """Like the real CV this was reported on: body text in a sans font embedded by a browser as a simple TrueType
+    subset with no Unicode cmap (letters only in ToUnicode), /Flags 4, and a name without "sans" in it.
+    The headings use a font named after a real Google Fonts family (Open Sans) to test completing a subset
+    with the full font of its own family."""
+    fonts = HERE.parent / "app" / "fonts"
+    doc = pymupdf.open()
+    page = doc.new_page(width=A4.width, height=A4.height)
+    lines = [("H", 22, "Professional summary"),
+             ("B", 11, "Software engineer with fifteen years of experience building web platforms,"),
+             ("B", 11, "data pipelines and developer tools for small teams and large companies."),
+             ("B", 11, "I enjoy turning vague problems into simple, reliable systems."),
+             ("H", 22, "Experience"),
+             ("B", 11, "Principal engineer at Example Corp, leading the platform group."),
+             ("B", 11, "Designed the billing service used by every product of the company."),
+             ("B", 11, "Mentored engineers and introduced code review and testing practices.")]
+    body = "".join(t for k, _, t in lines if k == "B")
+    head = "".join(t for k, _, t in lines if k == "H")
+    fb, cb = _simple_truetype(doc, fonts / "OpenSans-400.ttf", "CAAAAA+Humanist-Regular", body)
+    fh, ch = _simple_truetype(doc, fonts / "OpenSans-700.ttf", "DAAAAA+OpenSans-Bold", head)
+    y, ops = 90.0, []
+    for kind, size, text in lines:
+        codes = cb if kind == "B" else ch
+        y += size * (2.2 if kind == "H" else 1.6)
+        hexs = "".join(f"{codes[c]:02X}" for c in text)
+        ops.append(f"BT /{'F1' if kind == 'B' else 'F2'} {size} Tf 0.15 0.15 0.15 rg 60 {A4.height - y:.1f} Td "
+                   f"<{hexs}> Tj ET")
+    contents = doc.get_new_xref()
+    doc.update_object(contents, "<<>>")
+    doc.update_stream(contents, "\n".join(ops).encode())
+    doc.xref_set_key(page.xref, "Contents", f"{contents} 0 R")
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << /F1 {fb} 0 R /F2 {fh} 0 R >> >>")
+    return doc
+
+
 def scanned_en() -> pymupdf.Document:
     """A text-only-as-pixels version of the simple sample: forces the OCR path."""
     src = simple_en()
@@ -393,6 +470,9 @@ SAMPLES = {
                           "Collision regression test.", ["es", "de"]),
     "11-subset-heading-en.pdf": (subset_heading_en, "Headings in a font subset without umlauts/accents: "
                                  "missing-glyph regression test.", ["de", "es"]),
+    "12-subset-unicode-en.pdf": (subset_unicode_en, "Sans fonts embedded by a browser as TrueType subsets whose "
+                                 "letters are only in ToUnicode, flagged symbolic: the font must be reused, "
+                                 "completed, and never replaced by a serif.", ["de", "es"]),
 }
 
 
@@ -406,9 +486,14 @@ def cut_manual(path: Path, pages: int = 20) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manual", type=Path, help="full Stark VARG owner's manual PDF to cut")
+    ap.add_argument("--only", nargs="*", help="regenerate only these samples (file names)")
     args = ap.parse_args()
     manifest = {}
     for name, (fn, desc, targets) in SAMPLES.items():
+        if args.only and name not in args.only:
+            prev = HERE / name
+            manifest[name] = {"description": desc, "targets": targets, "pages": pymupdf.open(prev).page_count}
+            continue
         doc = fn()
         doc.set_metadata({"title": name, "producer": "pdf-translator samples/generate.py"})
         doc.save(HERE / name, garbage=4, deflate=True)

@@ -191,6 +191,27 @@ each query.
 - `UPDATE ... RETURNING` in autocommit mode keeps the statement, and the write lock, open until the cursor is
   fully read: the claim uses `fetchall()`.
 
+### 1.7 "My CV is in Ubuntu Sans and the translation comes out in a serif font"
+
+> my cv has a typography ubuntu sans, when translating i don't understand why it's getting changed to a serif
+> typography and the looks is totally different.
+
+**Diagnosis** (on the production run's output PDF, which still embeds the CV's original font for the
+untranslated text):
+1. The CV's `Ubuntu-Regular` is a simple TrueType subset whose own cmap maps only codes 1..81 to glyphs; the
+   letters live in the PDF's `ToUnicode`. The font rebuilder read only the font's cmap, saw 0 characters, and
+   dropped the font: no block could reuse it.
+2. The generic fallback was chosen from MuPDF's "serif" span flag. The descriptor only says `/Flags 4`
+   (symbolic) and the subset has no OS/2 table, MuPDF reports that as serif, and "Ubuntu" has no "sans" in
+   its name: every block went to Charis SIL.
+3. A third bug surfaced while testing the fix: a substitute label with spaces ("Open Sans 700 (bundled)")
+   ended up in a CSS `url()`, which broke the whole stylesheet and also produced Charis.
+
+**Fix:** rebuild the cmap from `ToUnicode`; complete a subset with the full font of its own family (bundled,
+else Google Fonts); classify serif/sans/monospace from the outlines; sanitise archive file names. A synthetic
+sample (`12-subset-unicode-en.pdf`) reproduces the CV's font structure without its personal data. On the
+real font: loaded (78 characters), measured as sans, completed from Google Fonts' Ubuntu in 0.8 s.
+
 ---
 
 ## 2. Runtime prompts

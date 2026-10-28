@@ -233,6 +233,19 @@ every embedded font with fontTools:
    made from two of its periods). Pure code: **0 tokens**, a few milliseconds per font, reported in Stats;
 3. the rebuilt font has no ligature table, so `fi` can no longer map to an empty glyph.
 
+Before giving up on the original design:
+
+- **Browser subsets.** Fonts embedded by Chrome/Skia "Save as PDF" have no Unicode cmap at all (codes 1..n);
+  the letters are only in the PDF's `ToUnicode` map, which is used to rebuild the font's character map.
+  Without it the font looked empty and every block fell back to a generic font.
+- **Same family, complete font.** If the subset still lacks letters of the target language, the complete
+  font of the same family and weight replaces it (`Ubuntu-Regular` → Ubuntu 400): from `app/fonts` if bundled,
+  else from Google Fonts at runtime, cached in `/data/fonts` (`FONT_DOWNLOADS=false` to disable). Same design,
+  every letter; Stats shows where it came from.
+- **Serif or sans is measured, not trusted.** When a generic fallback is still needed, it is chosen from the
+  font's own outlines (the foot of "I" is wider than its middle in a serif font). PDF flags are unreliable:
+  browser subsets are flagged "symbolic", which MuPDF reports as serif.
+
 When a letter cannot be built, the block uses a generic font as a whole (never a mixed word) and Review
 offers: a **similar complete font** for the whole document (ranked by width, cap height, x-height and
 stroke density from the bundled OFL fonts in `app/fonts`, and from Google Fonts at runtime only when none
@@ -267,6 +280,7 @@ including layout stress tests in Arabic and Chinese, runs in CI and in developme
 | `09-stark-varg-manual-20p` | first 20 pages of the real Stark VARG owner's manual |
 | `10-cv-like-en` | CV layout: words without space characters, two-column header, underlines, separators, symbol-font arrows |
 | `11-subset-heading-en` | headings in a font subset without umlauts or accents |
+| `12-subset-unicode-en` | browser-style TrueType subsets: letters only in `ToUnicode`, flagged symbolic, a sans font whose name has no "sans" |
 | `invalid/` | truncated, encrypted, not a PDF |
 
 Target languages were chosen to fail differently: German (expansion, umlauts), Arabic (RTL, shaping),

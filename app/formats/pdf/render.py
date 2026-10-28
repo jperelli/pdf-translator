@@ -10,15 +10,17 @@ Overflow ladder for each unit (stop at the first rung that fits):
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from html import escape
 
 import pymupdf
 
 from app.formats.pdf.extract import rules_on, split_line
-from app.formats.pdf.glyphs import RebuiltFont
+from app.formats.pdf.glyphs import RebuiltFont, parse_to_unicode
 from app.languages import Language
 from app.models import Fit, TextUnit
 
@@ -27,6 +29,7 @@ SCALES = (1.0, 0.94, 0.88, 0.82, 0.76, 0.7, 0.64, 0.58, 0.52)
 ALLOWED_TAGS = re.compile(r"</?(?:b|i|u)>|<br\s*/?>")
 PAIRED = re.compile(r"<(/?)(b|i|u)>")
 SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
+log = logging.getLogger(__name__)
 PAD = 1.5
 
 
@@ -78,10 +81,13 @@ class FontBook:
     usable: dict[str, bool] = field(default_factory=dict)
     archive: pymupdf.Archive = field(default_factory=pymupdf.Archive)
     _versions: dict[str, str] = field(default_factory=dict)  # font -> archive file of its latest build
-    substitutes: dict[str, str] = field(default_factory=dict)  # font -> similar font chosen in review
+    substitutes: dict[str, str] = field(default_factory=dict)  # font -> replacement (same family or review)
+    cache: Path | None = None  # where fonts downloaded from Google Fonts are kept
+    downloads: bool = False  # may we fetch the complete font of the same family from Google Fonts?
 
     def __post_init__(self) -> None:
         seen: set[int] = set()
+        self._generic: dict[str, str | None] = {}
         for page in self.doc:
             for xref, ext, _type, basefont, *_ in page.get_fonts(full=True):
                 name = SUBSET_PREFIX.sub("", basefont)
@@ -92,7 +98,7 @@ class FontBook:
                     _n, _e, _t, buf = self.doc.extract_font(xref)
                 except Exception:
                     continue
-                rf = RebuiltFont.from_pdf_font(name, buf) if buf else None
+                rf = RebuiltFont.from_pdf_font(name, buf, self._to_unicode(xref)) if buf else None
                 if not rf or not rf.cmap:
                     continue
                 if name in self.fonts:
@@ -100,16 +106,52 @@ class FontBook:
                 else:
                     self.fonts[name] = rf
 
+    def _to_unicode(self, xref: int) -> dict[int, str] | None:
+        try:
+            kind, val = self.doc.xref_get_key(xref, "ToUnicode")
+            return parse_to_unicode(self.doc.xref_stream(int(val.split()[0]))) if kind == "xref" else None
+        except Exception:
+            return None
+
+    def generic(self, font: str) -> str | None:
+        """The generic family that looks like `font` (from its outlines), for blocks that cannot use it."""
+        if font not in self._generic:
+            rf = self.fonts.get(font)
+            self._generic[font] = rf.generic() if rf else None
+        return self._generic[font]
+
+    def complete(self, font: str) -> bool:
+        """Replace a subset by the complete font of the same family (bundled, else Google Fonts): same design,
+        every letter. Returns False when the family is not available."""
+        from app.formats.pdf.fontmatch import same_family
+
+        found = same_family(font, self.cache, self.downloads)
+        if not found:
+            return False
+        label, path = found
+        generic = self.generic(font)
+        if not self.override(font, path):
+            return False
+        self.substitutes[font] = label
+        self._generic[font] = generic
+        log.info("font %s completed from %s", font, label)
+        return True
+
     def decide_for_target(self, texts_by_font: dict[str, list[str]], target: Language) -> None:
         """Before translating (fit measurements depend on it): build the target language's extra letters
         and keep a font when its script matches the target."""
         for font, texts in texts_by_font.items():
             rf = self.fonts.get(font)
-            if rf is None or (target.script != "latin" and target.code != "en"):
+            if target.script != "latin" and target.code != "en":
                 self.usable[font] = False
                 continue
             used = {c for t in texts for c in plain_text(t) if not c.isspace()}
-            rf.ensure(rf.missing("".join(used) + target.probe))
+            if rf is None:  # the embedded font could not be read at all: the same family may still be available
+                self.usable[font] = font != "ocr" and self.complete(font)
+                continue
+            left = rf.ensure(rf.missing("".join(used) + target.probe))
+            if any(c.isalpha() for c in left) and self.complete(font):
+                continue
             # usable when most source blocks are covered; uncovered blocks fall back one by one (and are reported)
             covered = sum(not rf.missing(plain_text(t)) for t in texts)
             self.usable[font] = bool(texts) and covered >= 0.6 * len(texts)
@@ -148,7 +190,8 @@ class FontBook:
 
     def _file(self, font: str) -> str:
         rf = self.fonts[font]
-        name = f"{self.css_name(font)}-{self.substitutes.get(font, 'orig')}-{len(rf.built)}.ttf"
+        sub = re.sub(r"[^A-Za-z0-9]", "", self.substitutes.get(font, "orig"))  # goes into a CSS url(): no spaces
+        name = f"{self.css_name(font)}-{sub}-{len(rf.built)}.ttf"
         if self._versions.get(font) != name:
             self.archive.add(rf.ttf(), name)
             self._versions[font] = name
@@ -171,7 +214,8 @@ class FontBook:
 def unit_html(unit: TextUnit, text: str, lang: Language, fonts: FontBook | None) -> tuple[str, str]:
     s = unit.style
     original = fonts is not None and fonts.use_original(s.font, text)
-    family = f"{fonts.css_name(s.font)}, {s.family}" if original else s.family
+    generic = (fonts.generic(s.font) if fonts else None) or s.family
+    family = f"{fonts.css_name(s.font)}, {generic}" if original else generic
     align = s.align
     if lang.rtl:
         align = {"left": "right", "justify": "justify"}.get(align, align)

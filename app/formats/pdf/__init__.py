@@ -44,6 +44,8 @@ class PdfDocument:
         self.scanned_pages = [p.number for p in self.doc if is_scanned(p)]
         self.fonts: FontBook | None = None
         self.min_scale_overrides: dict[str, float] = {}  # review decision "let it shrink more"
+        self.font_cache: Path | None = None  # set by the pipeline: complete same-family fonts from Google Fonts
+        self.font_downloads = False
         self._translated: pymupdf.Document | None = None
 
     def units(self, page: int) -> list[TextUnit]:
@@ -56,7 +58,7 @@ class PdfDocument:
 
     def prepare(self, target: Language) -> None:
         with MUPDF:
-            self.fonts = FontBook(self.doc)
+            self.fonts = FontBook(self.doc, cache=self.font_cache, downloads=self.font_downloads)
             texts: dict[str, list[str]] = defaultdict(list)
             for units in self._units.values():
                 for u in units:
