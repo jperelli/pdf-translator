@@ -79,3 +79,12 @@ def test_history_versions_and_redo(client):
     assert client.post("/api/jobs", data={"target": "es", "sample": "01-simple-en.pdf", "purpose": "publish"}).status_code == 422
     assert client.delete(f"/api/jobs/{jid}").status_code == 200
     assert client.get(f"/api/jobs/{jid}").status_code == 404
+
+
+def test_landing_page_and_app_routes(client):
+    home = client.get("/")
+    assert home.status_code == 200 and "Keep the design" in home.text and 'href="/app"' in home.text
+    app_page = client.get("/app")
+    assert app_page.status_code == 200 and 'id="drop"' in app_page.text
+    for asset in ("/landing.css", "/landing.js", "/landing/p1-de.webp", "/app.js"):
+        assert client.get(asset).status_code == 200, asset

@@ -3,3 +3,5 @@ pytest==9.1.1
 httpx==0.28.1
 # only needed to regenerate samples/05-source-ar.pdf (samples/generate.py)
 weasyprint==70.0
+# only needed to regenerate the landing page showcase (scripts/landing_showcase.py)
+pillow==13.0.0

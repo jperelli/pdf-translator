@@ -108,7 +108,7 @@ def _summary(job, ctx: Context | None) -> t.CallToolResult:
             "seconds": r["timings"].get("total"),
             "download_url": f"{base}/api/jobs/{job.id}/download",
             "report_url": f"{base}/api/jobs/{job.id}",
-            "web_url": f"{base}/#job={job.id}",
+            "web_url": f"{base}/app#job={job.id}",
         }
         stem = Path(job.filename).stem
         links = [

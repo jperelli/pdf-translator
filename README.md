@@ -39,7 +39,8 @@ run against a local pseudo-translation model (zero tokens, see [Pseudo mode](#ps
 
 ## Testing guide (for reviewers)
 
-`docker compose up --build`, open http://localhost:8000. Without `OPENAI_API_KEY` the app runs in demo mode
+`docker compose up --build`, open http://localhost:8000 for the landing page and http://localhost:8000/app for
+the translator (old `/#job=...` links redirect there). Without `OPENAI_API_KEY` the app runs in demo mode
 (the result screen says "demo (pseudo)" next to the score). Every sample below is one click away: **Try a
 sample** in the drop zone.
 
@@ -75,6 +76,13 @@ it fails), **Download** and the version switcher, then three tabs:
   timeline, all versions) and **Log** (the progress log, filterable).
 - **Review**: collisions, missing characters per font, low-quality blocks, heavy shrinking and terms, each
   with options marked "uses tokens" / "no tokens", an estimate before running, and **Apply and redo**.
+
+## Landing page
+
+`/` is a static landing page (`app/static/index.html`, `landing.css`, `landing.js`); the translator is at `/app`.
+Its showcase is real output, not a mock-up: two pages of the Stark VARG manual translated in Quality mode into
+German, Spanish, Arabic and Chinese (scores 99.1 to 99.5, no overlapping lines, 2 to 3 cents each).
+`scripts/landing_showcase.py` regenerates the images and prints the scores to copy into `landing.js`.
 
 ## Architecture
 
@@ -453,7 +461,7 @@ app/
   fonts/                bundled OFL candidate fonts (scripts/fetch_fonts.py)
   quality/checks.py     deterministic text checks and MQM-style scoring
   quality/layout.py     collisions, font fallbacks, read-back of the written PDF
-  static/               UI (no build step); Chart.js 4.5.1 vendored in static/vendor (MIT, CSP allows only 'self')
+  static/               landing page (index.html) and the translator UI (app.html), no build step; Chart.js 4.5.1 vendored in static/vendor (MIT, CSP allows only 'self')
 scripts/start.sh        container entry point: queue workers + web
 deploy/                 Grafana dashboard and Prometheus scrape job
 evals/run.py            offline eval harness

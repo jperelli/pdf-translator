@@ -438,4 +438,10 @@ async def http_error(_request: Request, exc: HTTPException):
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
+@app.get("/app", include_in_schema=False)
+def web_app():
+    """The translator itself; "/" is the landing page."""
+    return FileResponse(ROOT / "static" / "app.html", headers={"Cache-Control": "no-cache"})
+
+
 app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="static")

@@ -3,187 +3,183 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Stark · Document Translator</title>
+  <title>Stark Document Translator · Translate PDFs, keep the design</title>
+  <meta name="description" content="Translate PDFs into 16 languages keeping layout, fonts and images. Every page is checked for overflow and overlapping text, brand names stay untouched, and you see the score and the cost.">
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@300;400;500;600;700&display=swap">
-  <link rel="stylesheet" href="/app.css">
+  <!-- only the glyphs of the CJK language names below (a few KB), so they never show as empty boxes -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400&amp;family=Noto+Sans+JP:wght@400&amp;family=Noto+Sans+KR:wght@400&amp;text=%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87%E6%97%A5%E6%9C%AC%E8%AA%9E%ED%95%9C%EA%B5%AD%EC%96%B4&amp;display=swap">
+  <link rel="stylesheet" href="/landing.css">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="#"><img src="/logo.svg" alt="" width="28" height="28"><span class="wordmark">STARK</span><span class="product">Document Translator</span></a>
-  <nav class="nav">
-    <a href="#" id="nav-new">Translate</a>
-    <a href="#history" id="nav-history">History</a>
-    <a href="#admin" id="nav-admin">Admin</a>
-    <a href="#" id="nav-logout" hidden>Log out</a>
+<header class="top">
+  <a class="brand" href="/"><img src="/logo.svg" alt="" width="28" height="28"><span class="wordmark">STARK</span><span class="product">Document Translator</span></a>
+  <nav>
+    <a href="#showcase">Results</a>
+    <a href="#how">How it works</a>
+    <a href="#features">Features</a>
+    <a href="#agents">For agents</a>
+    <a class="btn small" href="/app">Translate a PDF</a>
   </nav>
 </header>
 
 <main>
-  <!-- upload -->
-  <section id="upload" class="panel">
-    <h1>Translate a PDF, keep the layout.</h1>
-    <form id="form">
-      <label id="drop" class="drop" tabindex="0">
-        <input id="file" type="file" accept="application/pdf,.pdf" hidden>
-        <button id="sample-btn" class="btn ghost small sample-btn" type="button">Try a sample</button>
-        <span class="drop-icon">PDF</span>
-        <span id="drop-text"><b>Drop a PDF here</b> or click to choose a file</span>
-        <span id="drop-hint" class="hint"></span>
-      </label>
-      <div class="purpose" role="radiogroup" aria-label="Purpose">
-        <label class="purpose-card"><input type="radio" name="purpose" value="fast" checked>
-          <b>Fast</b><ul><li>Fast and cheap</li><li>Good translation</li><li>No thorough style check</li></ul></label>
-        <label class="purpose-card"><input type="radio" name="purpose" value="quality">
-          <b>Quality</b><ul><li>Slower and more expensive</li><li>Good translation</li><li>Checks styling thoroughly and fixes layout mismatches</li></ul></label>
+  <section class="hero">
+    <div class="hero-text">
+      <p class="eyebrow">PDF translation with AI agents</p>
+      <h1>Translate the PDF.<br>Keep the design.</h1>
+      <p class="lead">Upload a PDF and get it back in another language with the same layout, fonts and images.
+        Every page is checked in the real renderer for overflowing and overlapping text, brand names stay
+        untouched, and you see what it scored and what it cost.</p>
+      <div class="cta">
+        <a class="btn" href="/app">Translate a PDF</a>
+        <a class="btn ghost" href="#showcase">See the Stark VARG manual</a>
       </div>
-      <div class="row">
-        <label class="field">Translate to <select id="target"></select></label>
-        <button id="go" class="btn primary" type="submit" disabled>Translate</button>
-      </div>
-      <p id="form-error" class="error" hidden></p>
-    </form>
+      <p class="note">No sign-up. Built-in samples to try it in one click.</p>
+    </div>
+    <figure class="hero-pages" aria-label="The same manual page in English and German">
+      <img src="/landing/p1-en.webp" alt="Stark VARG manual page in English" width="300" height="600">
+      <img src="/landing/p1-de.webp" alt="The same page translated into German" width="300" height="600">
+      <figcaption>English → German, same page, same fonts</figcaption>
+    </figure>
   </section>
 
-  <!-- progress -->
-  <section id="progress" class="panel" hidden>
-    <div class="job-head">
-      <div><h2 id="job-title"></h2><p id="job-sub" class="muted"></p></div>
-      <button class="btn ghost new-btn">New translation</button>
+  <section class="numbers" aria-label="Measured results">
+    <div><b>99+</b><span>score on the Stark VARG manual pages, in German, Spanish, Arabic and Chinese</span></div>
+    <div><b>0</b><span>overlapping lines: overlaps fail the document, they are never shipped silently</span></div>
+    <div><b>2–3¢</b><span>per two-page run in Quality mode, at OpenAI list prices</span></div>
+    <div><b>16</b><span>languages, including right-to-left Arabic and Hebrew, Chinese, Japanese and Korean</span></div>
+  </section>
+
+  <section id="showcase" class="showcase">
+    <h2>The real thing: the Stark VARG owner's manual</h2>
+    <p class="sub">Two pages of the real manual (dark design, custom typeface, a table of contents with page
+      numbers), translated in Quality mode. Pick a language.</p>
+    <div class="tabs" role="tablist" aria-label="Target language">
+      <button role="tab" data-lang="de" aria-selected="true">Deutsch</button>
+      <button role="tab" data-lang="es">Español</button>
+      <button role="tab" data-lang="ar">العربية</button>
+      <button role="tab" data-lang="zh">简体中文</button>
     </div>
-    <ol id="steps" class="steps">
-      <li data-stage="validate">Validate</li><li data-stage="extract">Read layout</li>
-      <li data-stage="analyze">Analyse</li><li data-stage="translate">Translate &amp; review</li>
-      <li data-stage="render">Rebuild PDF</li><li data-stage="done">Done</li>
+    <div class="compare">
+      <figure><figcaption>Original</figcaption>
+        <div class="pair"><img id="sc-o1" src="/landing/p1-en.webp" alt="Original page 1" width="300" height="600" loading="lazy">
+          <img id="sc-o2" src="/landing/p2-en.webp" alt="Original page 2" width="300" height="600" loading="lazy"></div></figure>
+      <figure><figcaption id="sc-label">Translated</figcaption>
+        <div class="pair"><img id="sc-t1" src="/landing/p1-de.webp" alt="Translated page 1" width="300" height="600" loading="lazy">
+          <img id="sc-t2" src="/landing/p2-de.webp" alt="Translated page 2" width="300" height="600" loading="lazy"></div></figure>
+    </div>
+    <dl class="scores" id="sc-scores"></dl>
+    <p class="note">"Stark", "Stark VARG" and "Stark Future" were detected as brand names and kept as written in
+      every language. Scores are the run's own report: translation quality from the reviewer agent, layout from reading
+      the written PDF back.</p>
+  </section>
+
+  <section id="how" class="how">
+    <h2>How it works</h2>
+    <ol class="steps">
+      <li><b>Read</b><span>Text blocks with their position, size, colour, alignment and font; images and
+        drawings stay where they are. Scanned pages go through OCR.</span></li>
+      <li><b>Analyse</b><span>Source language, tone and domain, brand and product names that must not be
+        translated, and a short glossary of the terms a generic translator gets wrong.</span></li>
+      <li><b>Translate</b><span>Page by page, in parallel, with the glossary and a length budget for each
+        box, so the text is written to fit instead of squeezed afterwards.</span></li>
+      <li><b>Check</b><span>Every block is laid out in the real PDF engine and measured: overflow, shrinking,
+        collisions with neighbours, missing glyphs. A reviewer agent scores the translation with MQM.</span></li>
+      <li><b>Fix and report</b><span>Failing blocks go back to a refiner that checks its own fit; stubborn
+        ones go to a stronger model that sees the page image. What is left becomes a decision for you.</span></li>
     </ol>
-    <div class="bar"><div id="bar-fill"></div></div>
-    <p id="stage-msg" class="stage-msg"></p>
-    <div id="pages" class="pages"></div>
-    <details class="activity" open>
-      <summary>Agent activity <span id="activity-count" class="muted"></span></summary>
-      <ul id="log" class="log"></ul>
-    </details>
-    <div id="job-error" class="error-card" hidden></div>
   </section>
 
-  <!-- result -->
-  <section id="result" class="panel" hidden>
-    <div class="result-top">
-      <div class="score-block">
-        <div id="score" class="score"></div>
-        <div>
-          <div class="score-label">quality <span class="muted">(lower of translation and layout)</span></div>
-          <div id="subscores" class="subscores"></div>
-          <div id="reasons" class="reasons"></div>
-        </div>
-      </div>
-      <div class="result-actions">
-        <a id="download" class="btn primary" href="#">Download PDF</a>
-        <button class="btn ghost new-btn">New translation</button>
-      </div>
-    </div>
-    <div class="result-meta"><span id="res-file"></span><span id="versions"></span></div>
-
-    <div class="tabs" role="tablist" data-group="main">
-      <button class="tab active" data-tab="preview">Preview</button>
-      <button class="tab" data-tab="details">Details</button>
-      <button class="tab" data-tab="review">Review <span id="review-badge" class="badge" hidden></span></button>
-    </div>
-
-    <div class="tab-body" data-group="main" data-body="preview">
-      <div class="pager">
-        <button id="prev" class="btn ghost small">&larr;</button><span id="page-label"></span><button id="next" class="btn ghost small">&rarr;</button>
-        <label class="check inline"><input id="outline" type="checkbox"> Outline blocks with issues</label>
-      </div>
-      <div class="compare">
-        <figure><figcaption>Original</figcaption><img id="img-orig" alt="Original page"></figure>
-        <figure><figcaption>Translated</figcaption><div class="overlay-wrap"><img id="img-tr" alt="Translated page"><div id="overlay"></div></div></figure>
-      </div>
-    </div>
-
-    <div class="tab-body" data-group="main" data-body="details" hidden>
-      <div class="subtabs" data-group="details">
-        <button class="subtab active" data-tab="jargon">Jargon</button>
-        <button class="subtab" data-tab="refinement">Refinement</button>
-        <button class="subtab" data-tab="stats">Stats</button>
-        <button class="subtab" data-tab="runlog">Log</button>
-      </div>
-      <div class="tab-body" data-group="details" data-body="jargon"><div id="analysis"></div></div>
-      <div class="tab-body" data-group="details" data-body="refinement" hidden>
-        <label class="check"><input id="only-issues" type="checkbox" checked> Only blocks with issues or revisions</label>
-        <div id="blocks"></div>
-      </div>
-      <div class="tab-body" data-group="details" data-body="stats" hidden><div id="stats"></div></div>
-      <div class="tab-body" data-group="details" data-body="runlog" hidden>
-        <div id="log-filters" class="chips"></div>
-        <ul id="runlog" class="log tall"></ul>
-      </div>
-    </div>
-
-    <div class="tab-body" data-group="main" data-body="review" hidden>
-      <p class="muted">What did not work, and what you can do about it. Pick the alternatives you want and redo:
-        only the affected blocks are processed again; the rest is reused as is.</p>
-      <div id="review"></div>
-      <div class="redo-bar">
-        <span id="estimate" class="muted"></span>
-        <button id="redo" class="btn primary">Apply and redo</button>
-      </div>
+  <section id="features" class="features">
+    <h2>Features</h2>
+    <div class="grid">
+      <article><h3>Layout preserved</h3><p>Same position, size, colour and alignment. Text grows into free
+        space, shrinks within limits you choose, and keeps line breaks, bold, italics and underlines.</p></article>
+      <article><h3>The original fonts</h3><p>Embedded fonts are rebuilt and reused. Missing accented letters (Ä, Ö,
+        Ü) are assembled from the font's own glyphs; subsets are completed with the full font of the same family.</p></article>
+      <article><h3>No overlapping text</h3><p>The written PDF is read back. Text that collides with another
+        block fails the document in both modes, with the exact block to fix.</p></article>
+      <article><h3>Brands and jargon</h3><p>"Stark" stays Stark, not "strong". Product names, codes and URLs
+        are copied verbatim, and domain slang follows a glossary you can edit before a redo.</p></article>
+      <article><h3>Two honest scores</h3><p>Translation quality and layout fidelity, reported separately.
+        The headline is the lower of the two, so a beautiful page with a wrong sentence does not pass.</p></article>
+      <article><h3>Fast or Quality</h3><p>Fast is cheap and good for understanding a document. Quality checks
+        styling thoroughly, escalates hard blocks to a stronger model and fixes layout mismatches.</p></article>
+      <article><h3>Review and redo</h3><p>Each remaining problem comes with options (another font, keep a term,
+        allow more shrinking) and a token estimate. Redo reprocesses only what changed, as a new version.</p></article>
+      <article><h3>Cost and time, visible</h3><p>Tokens, cost, requests and time per agent, stage and page, with
+        interactive charts. Font fixes and layout checks cost zero tokens.</p></article>
+      <article><h3>Built for long jobs</h3><p>Translations run on a queue with separate workers: live progress,
+        retries after a crash or redeploy, cancel any time, history kept across restarts.</p></article>
+      <article><h3>Right-to-left and CJK</h3><p>Arabic and Hebrew are mirrored and shaped; Chinese, Japanese and
+        Korean get a CJK font embedded once for the whole document.</p></article>
+      <article><h3>An MCP server for agents</h3><p>Other agents can translate documents through MCP, with
+        progress streamed over SSE while they wait. See below.</p></article>
+      <article><h3>Observable</h3><p>An admin page for the queue and workers, Prometheus metrics with a ready
+        Grafana dashboard, and the agent traces in the OpenAI dashboard.</p></article>
     </div>
   </section>
 
-  <!-- history -->
-  <section id="history" class="panel" hidden>
-    <div class="job-head"><h2>Previous runs</h2><button class="btn ghost new-btn">New translation</button></div>
-    <div class="table-wrap"><table id="history-table"></table></div>
-    <div class="pager"><button id="h-prev" class="btn ghost small">&larr;</button><span id="h-label"></span><button id="h-next" class="btn ghost small">&rarr;</button></div>
+  <section class="languages">
+    <h2>16 languages</h2>
+    <ul class="langs">
+      <li>English</li><li>Español</li><li>Deutsch</li><li>Français</li><li>Italiano</li><li>Português</li>
+      <li>Nederlands</li><li>Svenska</li><li>Suomi</li><li>Polski</li><li>Русский</li><li dir="rtl">العربية</li>
+      <li dir="rtl">עברית</li><li>简体中文</li><li>日本語</li><li>한국어</li>
+    </ul>
   </section>
-  <!-- admin -->
-  <section id="admin" class="panel" hidden>
-    <div class="job-head">
-      <div><h2>Queue and workers</h2><p class="muted" id="admin-updated"></p></div>
-      <label class="check inline"><input id="admin-auto" type="checkbox" checked> Refresh every 3 s</label>
+
+  <section id="agents" class="agents">
+    <div>
+      <h2>For agents: an MCP server</h2>
+      <p>Point any MCP client at <code>/mcp</code> (Streamable HTTP, bearer token). A translation takes seconds to
+        minutes, so the tools follow a job pattern that works in every client, with progress on the response's
+        SSE stream.</p>
+      <ul class="tools">
+        <li><code>translate_pdf</code> starts a job from a public URL, an upload, a small base64 file or a sample.</li>
+        <li><code>wait_for_translation</code> streams progress (step, page, percent) until the job ends.</li>
+        <li><code>get_translation</code> returns the scores, the issues to review, the cost and the download link.</li>
+        <li><code>cancel_translation</code>, <code>list_languages</code>, <code>list_samples</code>.</li>
+      </ul>
     </div>
-    <div id="admin-cards" class="stat-row"></div>
-    <h3>Worker processes</h3>
-    <p class="muted">The consumer forks one process per worker (<code>WORKERS</code>) plus one scheduler; workers are
-      recycled after <code>WORKER_MAX_TASKS</code> jobs to give memory back.</p>
-    <div class="table-wrap"><table id="admin-procs"></table></div>
-    <h3>Running</h3><div class="table-wrap"><table id="admin-running"></table></div>
-    <h3>Queued</h3><div class="table-wrap"><table id="admin-queued"></table></div>
-    <h3>Recent failures</h3><div class="table-wrap"><table id="admin-failed"></table></div>
-    <p class="muted">Trends and alerts: Grafana, from <code>/metrics</code> (see the README).</p>
+    <div class="code">
+      <div class="code-head"><span>MCP client configuration</span><button class="btn ghost small" id="copy">Copy</button></div>
+      <pre id="mcp-config"><code>{
+  "mcpServers": {
+    "pdf-translator": {
+      "type": "http",
+      "url": "<span id="mcp-url">https://pdf-translator.coffee.jperelli.com/mcp</span>",
+      "headers": { "Authorization": "Bearer &lt;MCP_TOKEN&gt;" }
+    }
+  }
+}</code></pre>
+    </div>
+  </section>
+
+  <section class="limits">
+    <h2>What it does not do (yet)</h2>
+    <ul>
+      <li>Rotated and vertical text is left as it is.</li>
+      <li>Inside one paragraph, mixed colours or sizes take the dominant style (bold and italic are kept).</li>
+      <li>Font subsets whose letters cannot be read or completed fall back to the closest generic family; the
+        Review tab tells you which blocks and offers similar fonts.</li>
+      <li>A retried job starts again from page 1.</li>
+    </ul>
+  </section>
+
+  <section class="final">
+    <h2>Try it on your own PDF</h2>
+    <p>Up to <span id="lim-pages">60</span> pages and <span id="lim-mb">30</span> MB. Or pick one of the samples: a CV, tight boxes, a multi-column page, scanned pages.</p>
+    <a class="btn" href="/app">Translate a PDF</a>
   </section>
 </main>
 
-<dialog id="confirm-dialog" class="dialog">
-  <p id="confirm-text"></p>
-  <div class="row"><button id="confirm-yes" class="btn primary" type="button">Yes</button>
-    <button id="confirm-no" class="btn ghost" type="button">No</button></div>
-</dialog>
-
-<dialog id="login-dialog" class="dialog" aria-labelledby="login-title">
-  <form id="login-form" method="dialog">
-    <div class="dialog-head"><h2 id="login-title">Administrator</h2>
-      <button id="login-close" class="btn ghost small" type="button" aria-label="Close">&times;</button></div>
-    <p class="muted" id="login-why">History and the admin area need the admin token (<code>ADMIN_TOKEN</code>).</p>
-    <label class="field">Admin token <input id="login-token" type="password" autocomplete="current-password" required></label>
-    <p id="login-error" class="error" hidden></p>
-    <div class="row"><button class="btn primary" type="submit">Log in</button></div>
-  </form>
-</dialog>
-
-<dialog id="sample-dialog" class="dialog" aria-labelledby="sample-title">
-  <div class="dialog-head">
-    <h2 id="sample-title">Try a sample</h2>
-    <button id="sample-close" class="btn ghost small" type="button" aria-label="Close">&times;</button>
-  </div>
-  <p class="muted">Short test documents, each built to stress one thing.</p>
-  <ul id="samples" class="sample-list"></ul>
-</dialog>
-<footer class="foot">Built for Stark Future · OpenAI Agents SDK · PyMuPDF</footer>
-<script src="/vendor/chart-4.5.1.umd.min.js"></script>
-<script src="/charts.js"></script>
-<script src="/app.js"></script>
+<footer class="foot">
+  <span>Built for Stark Future · OpenAI Agents SDK · PyMuPDF · fontTools</span>
+  <a href="https://github.com/jperelli/pdf-translator">Source on GitHub</a>
+</footer>
+<script src="/landing.js"></script>
 </body>
 </html>
