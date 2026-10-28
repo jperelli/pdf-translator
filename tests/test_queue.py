@@ -80,3 +80,35 @@ def test_busy_worker_is_not_mistaken_for_dead(samples):
     assert recover(time.time() + 3600) == []
     assert db.job(job_id)["status"] == "running"
     db.fail(job_id, 1, "cleanup")
+
+
+def test_old_database_is_migrated(tmp_path):
+    """A database from before the queue: no version/attempt columns, a job with two versions, events inline."""
+    import json
+    import sqlite3
+
+    from app.store import Store
+
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE jobs (id TEXT PRIMARY KEY, filename TEXT NOT NULL, target TEXT NOT NULL,
+            purpose TEXT NOT NULL DEFAULT 'publish', status TEXT NOT NULL, error TEXT, created REAL NOT NULL,
+            updated REAL NOT NULL, pages INTEGER, versions INTEGER NOT NULL DEFAULT 0, score REAL,
+            translation_score REAL, layout_score REAL, tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE versions (job_id TEXT NOT NULL, version INTEGER NOT NULL, created REAL NOT NULL,
+            decisions TEXT, result TEXT, events TEXT, PRIMARY KEY (job_id, version));
+    """)
+    db.execute("INSERT INTO jobs (id, filename, target, status, created, updated, versions) "
+               "VALUES ('j', 'cv.pdf', 'de', 'done', 1, 1, 2)")
+    for v in (1, 2):
+        db.execute("INSERT INTO versions VALUES ('j', ?, 1, NULL, ?, ?)",
+                   (v, json.dumps({"v": v}), json.dumps([{"type": "page", "v": v}])))
+    db.commit()
+    db.close()
+    store = Store(path)
+    assert store.job("j")["version"] == 2 and store.job("j")["attempt"] == 1
+    assert store.version("j")["events"] == [{"type": "page", "v": 2}]  # inline events of old rows still load
+    Store(path)  # idempotent
+    assert store.job("j")["version"] == 2

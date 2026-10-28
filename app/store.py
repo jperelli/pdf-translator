@@ -72,6 +72,9 @@ class Store:
                 for name, decl in cols.items():
                     if name not in have:
                         self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            # rows from before jobs.version existed got 1: point them at their newest version (idempotent)
+            self._db.execute("UPDATE jobs SET version=(SELECT MAX(version) FROM versions v WHERE v.job_id=jobs.id) "
+                             "WHERE version < (SELECT MAX(version) FROM versions v WHERE v.job_id=jobs.id)")
 
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
