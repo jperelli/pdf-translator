@@ -34,11 +34,15 @@ from app.models import (
     Fit,
     Issue,
     PageReport,
+    CallRecord,
     QualityReport,
+    Term,
     TextUnit,
     Usage,
 )
 from app.quality.checks import check_block, score
+from app.quality.layout import LAYOUT_CATEGORIES
+from app.review import build_items, resolve_candidate, transliterate
 
 log = logging.getLogger(__name__)
 Emit = Callable[[dict[str, Any]], None]
@@ -75,7 +79,11 @@ def _sample_for_analysis(pages: list[list[TextUnit]], budget: int = 9000) -> lis
 
 
 class TranslationPipeline:
-    def __init__(self, settings: Settings, emit: Emit, job_id: str = "local"):
+    def __init__(self, settings: Settings, emit: Emit, job_id: str = "local", purpose: str = "publish",
+                 version: int = 1):
+        self.purpose = purpose
+        self.version = version
+        settings = settings.for_purpose(purpose)
         self.s = settings
         self.emit = emit
         self.job_id = job_id
@@ -88,6 +96,9 @@ class TranslationPipeline:
         self._done_pages = 0
         self.failed: set[str] = set()
         self.judged: set[str] = set()
+        self.calls: list[CallRecord] = []
+        self.page_sizes: list[tuple[float, float]] = []
+        self.counters: dict[str, float] = {}
 
     # ------------------------------------------------------------------ helpers
 
@@ -101,9 +112,21 @@ class TranslationPipeline:
     def protected(self) -> list[str]:
         return sorted({t.term for t in self.analysis.protected_terms}) if self.analysis else []
 
-    async def _agent(self, agent, payload, ctx, **kw):
+    async def _agent(self, agent, payload, ctx, *, stage: str, page: int | None = None, rnd: int = 0,
+                     blocks: int = 0, **kw):
+        model = agent.model if isinstance(agent.model, str) else "pseudo"
+
+        def record(u: Usage, seconds: float, _ok: bool) -> None:
+            pin, pout = self.s.price(model)
+            self.calls.append(CallRecord(
+                agent=agent.name, model=model, stage=stage, page=page, round=rnd, blocks=blocks,
+                requests=u.requests, input_tokens=u.input_tokens, output_tokens=u.output_tokens,
+                cost_usd=round((u.input_tokens * pin + u.output_tokens * pout) / 1e6, 6),
+                seconds=round(seconds, 2), version=self.version))
+
         async with self.llm:
-            return await run_agent(agent, payload, ctx, self.usage, timeout=self.s.llm_timeout_seconds * 2, **kw)
+            return await run_agent(agent, payload, ctx, self.usage, timeout=self.s.llm_timeout_seconds * 2,
+                                   on_usage=record, **kw)
 
     # ------------------------------------------------------------------ main
 
@@ -144,7 +167,8 @@ class TranslationPipeline:
         t = time.perf_counter()
         sample = _sample_for_analysis(pages)
         try:
-            result = await self._agent(self.factory.analyst(), {"blocks": sample}, self._ctx(target))
+            result = await self._agent(self.factory.analyst(), {"blocks": sample}, self._ctx(target),
+                                       stage="analysis", blocks=len(sample))
             self.analysis = Analysis.model_validate(result.model_dump())
         except AgentRunError as exc:
             log.warning("analysis failed, continuing without it: %s", exc)
@@ -169,16 +193,150 @@ class TranslationPipeline:
         await asyncio.gather(*(one(p) for p in range(n)))
         self.timings["translate_and_qa"] = time.perf_counter() - t
 
+        return await self._finish(doc, pages, out, target, t0)
+
+    async def _finish(self, doc, pages: list[list[TextUnit]], out: Path, target: Language, t0: float,
+                      decisions: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.page_sizes = await asyncio.to_thread(doc.page_sizes)
         self._stage("render", "Rebuilding the PDF with the original layout", 92)
         t = time.perf_counter()
-        final = {bid: (b.best.text, b.best.fit) for bid, b in self.blocks.items() if b.best}
+        final = {bid: b.best.text for bid, b in self.blocks.items() if b.best}
         render_info = await asyncio.to_thread(doc.render, final, target, out)
         self.timings["render"] = time.perf_counter() - t
-        self.timings["total"] = time.perf_counter() - t0
+        self._apply_final_layout(render_info)
         report, blocks = self._report(pages, render_info)
+        self._stage("review", "Preparing the review of what did not work", 97)
+        styles = {u.style.font: (u.style.family, u.style.bold) for units in pages for u in units}
+        t = time.perf_counter()
+        items = await asyncio.to_thread(build_items, blocks, self.analysis, doc.fonts, self.s.quality_threshold,
+                                        self.purpose, self.s.data_dir / "fonts", styles)
+        self.counters["review_s"] = round(time.perf_counter() - t, 2)
+        self.timings["total"] = time.perf_counter() - t0
+        report.timings = {k: round(v, 2) for k, v in self.timings.items()}
         self._stage("done", "Translation ready", 100)
         return {"report": report.model_dump(), "blocks": [b.model_dump() for b in blocks],
-                "analysis": self.analysis.model_dump(), "target": target.code}
+                "analysis": self.analysis.model_dump(), "target": target.code,
+                "calls": [c.model_dump() for c in self.calls], "counters": self.counters,
+                "glyphs": render_info.get("glyphs", {}), "purpose": self.purpose, "version": self.version,
+                "review": items, "decisions": decisions or {}}
+
+    # ------------------------------------------------------------------ redo with review decisions
+
+    async def redo(self, src: Path, out: Path, target_code: str, filename: str, previous: dict[str, Any],
+                   decisions: dict[str, Any]) -> dict[str, Any]:
+        target = get_language(target_code)
+        t0 = time.perf_counter()
+        with trace(f"Redo {filename} -> {target.code} v{self.version}", group_id=self.job_id,
+                   metadata={"job_id": self.job_id, "version": str(self.version)}):
+            self._stage("validate", "Reopening the document", 2)
+            fmt = detect(filename, src.read_bytes()[:2048])
+            doc = await asyncio.to_thread(fmt.load, src, max_pages=self.s.max_pages,
+                                          ocr_language=self.s.ocr_language, min_font_scale=self.s.min_font_scale)
+            try:
+                return await self._redo(doc, out, target, previous, decisions, t0)
+            finally:
+                doc.close()
+
+    async def _redo(self, doc, out: Path, target: Language, previous: dict[str, Any], decisions: dict[str, Any],
+                    t0: float) -> dict[str, Any]:
+        n = doc.page_count
+        pages = await asyncio.to_thread(lambda: [doc.units(p) for p in range(n)])
+        self.emit({"type": "extracted", "pages": n, "blocks": sum(map(len, pages)), "scanned_pages": []})
+        self.analysis = Analysis.model_validate(previous["analysis"])
+        terms = decisions.get("terms") or {}
+        keep = [t for t in terms.get("keep_original", []) if t]
+        translate = [t for t in terms.get("translate", []) if t]
+        self.analysis.jargon = [j for j in self.analysis.jargon if j.term not in keep]
+        self.analysis.protected_terms = [t for t in self.analysis.protected_terms if t.term not in translate]
+        self.analysis.protected_terms += [Term(term=t, kind="other", reason="kept by the user") for t in keep]
+        await asyncio.to_thread(doc.prepare, target)
+
+        prev = {b["id"]: BlockResult.model_validate(b) for b in previous["blocks"]}
+        for units in pages:
+            for u in units:
+                st = self.blocks[u.id] = BlockState(u)
+                if u.id in prev:
+                    pb = prev[u.id]
+                    st.consider(Attempt(iteration=0, stage="previous", text=pb.translation, score=pb.score, fit=pb.fit,
+                                        issues=[i for i in pb.issues if i.category not in LAYOUT_CATEGORIES]))
+        self._stage("translate", "Applying your decisions", 20)
+        direct: dict[str, str] = {}
+        instructions: dict[str, str] = {}
+        strong: list[str] = []
+        accepted: set[str] = set()
+
+        for key in ("collision", "layout"):
+            d = decisions.get(key) or {}
+            ids = [i for i in d.get("blocks", []) if i in self.blocks]
+            if d.get("action") == "shorten":
+                for i in ids:
+                    instructions[i] = "Make it noticeably shorter so it fits its box without overlapping anything."
+            elif d.get("action") == "shrink":
+                for i in ids:
+                    doc.min_scale_overrides[i] = 0.5
+            elif d.get("action") == "accept":
+                accepted |= set(ids)
+        for bid, d in (decisions.get("quality") or {}).items():
+            if bid not in self.blocks:
+                continue
+            if d.get("action") == "retry_strong":
+                strong.append(bid)
+            elif d.get("action") == "edit" and d.get("text", "").strip():
+                direct[bid] = d["text"]
+            elif d.get("action") == "accept":
+                accepted.add(bid)
+        for font, d in (decisions.get("fonts") or {}).items():
+            action = d.get("action", "")
+            ids = [bid for bid, st in self.blocks.items() if st.unit.style.font == font and st.best]
+            if action.startswith("similar:"):
+                path = resolve_candidate(action, self.s.data_dir / "fonts")
+                if path and doc.fonts and doc.fonts.override(font, path):
+                    self.emit({"type": "log", "message": f'Font "{font}" replaced by {path.stem} in every block'})
+            elif action == "transliterate" and doc.fonts:
+                for bid in ids:
+                    miss = doc.fonts.missing(font, self.blocks[bid].best.text)
+                    if miss:
+                        direct[bid] = transliterate(self.blocks[bid].best.text, miss)
+            elif action == "rewrite" and doc.fonts and font in doc.fonts.fonts:
+                allowed = "".join(sorted(chr(c) for c in doc.fonts.fonts[font].cmap if chr(c).isprintable()))
+                for bid in ids:
+                    if doc.fonts.missing(font, self.blocks[bid].best.text):
+                        instructions[bid] = (f"Use ONLY these characters (the font has no others): {allowed}. "
+                                             "Choose other words rather than dropping letters.")
+        for t in keep + translate:
+            what = f'Keep "{t}" exactly as in the source (do not translate it).' if t in keep else \
+                f'"{t}" is not a brand name here: translate it.'
+            for bid, st in self.blocks.items():
+                if t.lower() in plain_text(st.unit.text).lower():
+                    instructions[bid] = (instructions.get(bid, "") + " " + what).strip()
+
+        self.emit({"type": "redo", "direct": len(direct), "agent": len(instructions), "strong": len(strong),
+                   "shrink": len(doc.min_scale_overrides), "fonts": list((decisions.get("fonts") or {}).keys())})
+        for bid, text in direct.items():
+            st = self.blocks[bid]
+            fit = await asyncio.to_thread(doc.measure, st.unit, text, target)
+            issues = check_block(st.unit.text, text, target, self.protected, fit, self.s.min_font_scale)
+            st.attempts.append(Attempt(iteration=1, stage="edit", text=text, score=score(issues), fit=fit, issues=issues))
+            st.best = st.attempts[-1]  # the user's choice wins
+        revised: dict[str, str] = {}
+        if instructions:
+            revised.update(await self._revise(doc, list(instructions), target, escalate=False, stage="redo",
+                                              extra=instructions, round=1))
+        if strong:
+            revised.update(await self._revise(doc, strong, target, escalate=True, stage="redo", round=1))
+        if revised:
+            await self._evaluate(doc, revised, target, "redo", 1)
+        self._stage("translate", "Laying out every page again", 70)
+        for p in range(n):
+            await self._layout_round(doc, p, target)
+        for bid in accepted:
+            best = self.blocks[bid].best
+            if best:
+                for i in best.issues:
+                    if i.category in ("collision", "layout") and "(accepted)" not in i.message:
+                        i.severity, i.message = "minor", i.message + " (accepted)"
+                best.score = score(best.issues)
+        return await self._finish(doc, pages, out, target, t0, decisions)
 
     # ------------------------------------------------------------------ per page
 
@@ -204,6 +362,7 @@ class TranslationPipeline:
             drafts.update(res)
         self.emit({"type": "page_step", "page": p + 1, "step": "translated", "blocks": len(drafts)})
         await self._evaluate(doc, drafts, target, "translate", 0)
+        await self._layout_round(doc, p, target)
         failing = sum(not self._passes(u.id) for u in units)
         self.emit({"type": "page_step", "page": p + 1, "step": "reviewed", "failing": failing})
 
@@ -212,14 +371,17 @@ class TranslationPipeline:
             if not failing:
                 break
             self.emit({"type": "refine", "page": p + 1, "iteration": it, "blocks": failing})
-            revised = await self._revise(doc, failing, target, escalate=False)
+            revised = await self._revise(doc, failing, target, escalate=False, round=it)
             await self._evaluate(doc, revised, target, "refine", it)
+            await self._layout_round(doc, p, target)
 
         failing = [u.id for u in units if not self._passes(u.id)]
         if failing and self.s.enable_escalation:
             self.emit({"type": "escalate", "page": p + 1, "blocks": failing})
-            revised = await self._revise(doc, failing, target, escalate=True, page=p)
+            revised = await self._revise(doc, failing, target, escalate=True, page=p,
+                                         round=self.s.max_refine_iterations + 1)
             await self._evaluate(doc, revised, target, "escalate", self.s.max_refine_iterations + 1)
+            await self._layout_round(doc, p, target)
         self._page_done(p, n_pages, target)
 
     def _page_done(self, p: int, n_pages: int, target: Language) -> None:
@@ -239,7 +401,8 @@ class TranslationPipeline:
         payload = {"blocks": [{"id": u.id, "text": u.text, "role": u.role, "max_chars": u.max_chars_hint}
                               for u in batch]}
         try:
-            res = await self._agent(self.factory.translator(), payload, self._ctx(target, ids))
+            res = await self._agent(self.factory.translator(), payload, self._ctx(target, ids), stage="translate",
+                                    page=batch[0].page + 1, blocks=len(batch))
             return {t.id: t.text for t in res.translations if t.id in ids}
         except AgentRunError as exc:
             if len(batch) > 1:  # split and retry: one bad block should not sink the page
@@ -264,7 +427,8 @@ class TranslationPipeline:
             return res
         return check
 
-    async def _revise(self, doc, ids: list[str], target: Language, *, escalate: bool, page: int | None = None) -> dict[str, str]:
+    async def _revise(self, doc, ids: list[str], target: Language, *, escalate: bool, page: int | None = None,
+                      round: int = 0, stage: str | None = None, extra: dict[str, str] | None = None) -> dict[str, str]:
         out: dict[str, str] = {}
         agent = self.factory.escalation() if escalate else self.factory.refiner()
         images = None
@@ -282,10 +446,14 @@ class TranslationPipeline:
                                for i in st.best.issues],
                     "fits": st.best.fit.status != "overflow", "max_chars": st.unit.max_chars_hint,
                 })
+                if extra and bid in extra:
+                    blocks[-1]["instruction"] = extra[bid]
             ctx = self._ctx(target, chunk)
             ctx.fit_checker = self._fit_tool(doc, target)
             try:
-                res = await self._agent(agent, {"blocks": blocks}, ctx, images=images, max_turns=8)
+                res = await self._agent(agent, {"blocks": blocks}, ctx, images=images, max_turns=8,
+                                        stage=stage or ("escalate" if escalate else "refine"),
+                                        page=self.blocks[chunk[0]].unit.page + 1, rnd=round, blocks=len(chunk))
                 out.update({t.id: t.text for t in res.translations if t.id in chunk})
                 self.failed.difference_update(out)
                 self.emit({"type": "tool", "agent": agent.name, "tool": "check_fit", "calls": ctx.fit_checks})
@@ -321,7 +489,8 @@ class TranslationPipeline:
             payload = {"blocks": [{"id": bid, "source": self.blocks[bid].unit.text, "translation": candidates[bid]}
                                   for bid in chunk]}
             try:
-                rep = await self._agent(self.factory.judge(), payload, self._ctx(target, chunk))
+                rep = await self._agent(self.factory.judge(), payload, self._ctx(target, chunk), stage="judge",
+                                        page=self.blocks[chunk[0]].unit.page + 1, blocks=len(chunk))
             except AgentRunError as exc:
                 self.emit({"type": "warning", "message": f"Quality judge unavailable for {len(chunk)} blocks: {exc}"})
                 continue
@@ -333,6 +502,39 @@ class TranslationPipeline:
                                        suggestion=e.suggestion or None) for e in b.errors]
         return out
 
+    # ------------------------------------------------------------------ layout
+
+    def _rescore(self, st: BlockState, layout_issues: list[Issue], fit: Fit | None = None) -> None:
+        best = st.best
+        if best is None:
+            return
+        if any("(accepted)" in i.message for i in best.issues):
+            for i in layout_issues:
+                if i.category in ("collision", "layout"):
+                    i.severity, i.message = "minor", i.message + " (accepted)"
+        best.issues = [i for i in best.issues if i.category not in LAYOUT_CATEGORIES] + layout_issues
+        if fit is not None:
+            best.fit = fit
+        best.score = score(best.issues)
+
+    async def _layout_round(self, doc, p: int, target: Language) -> None:
+        """Lay the page out with the current best texts; collisions and font problems become issues."""
+        texts = {bid: st.best.text for bid, st in self.blocks.items() if st.unit.page == p and st.best}
+        if not texts:
+            return
+        t = time.perf_counter()
+        layout = await asyncio.to_thread(doc.layout_page, p, texts, target)
+        self.counters["layout_qa_s"] = self.counters.get("layout_qa_s", 0) + time.perf_counter() - t
+        for bid, (fit, _probe, issues) in layout.items():
+            self._rescore(self.blocks[bid], issues, fit)
+        collisions = sum(any(i.category == "collision" for i in iss) for _f, _p, iss in layout.values())
+        if collisions:
+            self.emit({"type": "layout", "page": p + 1, "collisions": collisions})
+
+    def _apply_final_layout(self, render_info: dict[str, Any]) -> None:
+        for bid, issues in render_info["layout_issues"].items():
+            self._rescore(self.blocks[bid], issues, render_info["fits"].get(bid))
+
     # ------------------------------------------------------------------ report
 
     def _report(self, pages: list[list[TextUnit]], render_info: dict[str, Any]) -> tuple[QualityReport, list[BlockResult]]:
@@ -341,14 +543,35 @@ class TranslationPipeline:
             b = st.best
             if not b:
                 continue
+            text_issues = [i for i in b.issues if i.category not in LAYOUT_CATEGORIES]
+            lay_issues = [i for i in b.issues if i.category in LAYOUT_CATEGORIES]
             blocks.append(BlockResult(
                 id=st.unit.id, page=st.unit.page + 1, source=st.unit.text, translation=b.text, score=b.score,
+                translation_score=score(text_issues), layout_score=score(lay_issues), font=st.unit.style.font,
                 fit=b.fit, issues=b.issues, attempts=st.attempts, converged=self._passes(st.unit.id),
                 font_preserved=bool(render_info["font_preserved"].get(st.unit.id))))
         blocks.sort(key=lambda b: (b.page, int(b.id.split("-b")[1])))
         weight = lambda b: max(1, len(plain_text(b.source)) + len(CJK_CHAR.findall(b.source)))  # noqa: E731
         total_w = sum(weight(b) for b in blocks) or 1
-        doc_score = sum(b.score * weight(b) for b in blocks) / total_w
+        wmean = lambda key: sum(getattr(b, key) * weight(b) for b in blocks) / total_w  # noqa: E731
+        collisions = sum(any(i.category == "collision" for i in b.issues) for b in blocks)
+        overlaps = sum(render_info.get("output_overlaps", {}).values())
+        translation_score = wmean("translation_score")
+        # every collision costs 5 points at document level: one overlap is enough to make a page unusable
+        layout_score = max(0.0, wmean("layout_score") - 5 * collisions - 5 * overlaps)
+        if not render_info["images_preserved"]:
+            layout_score = max(0.0, layout_score - 10)
+        headline = min(translation_score, layout_score)
+        reasons = []
+        if collisions or overlaps:
+            reasons.append(f"{collisions + overlaps} overlapping text block(s)")
+        if translation_score < self.s.quality_threshold:
+            reasons.append(f"translation quality {translation_score:.0f} < {self.s.quality_threshold:.0f}")
+        if layout_score < self.s.quality_threshold:
+            reasons.append(f"layout fidelity {layout_score:.0f} < {self.s.quality_threshold:.0f}")
+        untranslated = [b for b in blocks if any("service failed" in i.message for i in b.issues)]
+        if untranslated:
+            reasons.append(f"{len(untranslated)} block(s) left untranslated")
         sev = {"minor": 0, "major": 0, "critical": 0}
         for b in blocks:
             for i in b.issues:
@@ -356,16 +579,25 @@ class TranslationPipeline:
         page_reports = []
         for p, units in enumerate(pages):
             pb = [b for b in blocks if b.page == p + 1]
+            avg = lambda key: round(sum(getattr(b, key) for b in pb) / len(pb), 1) if pb else 100.0  # noqa: E731
+            w, h = self.page_sizes[p] if p < len(self.page_sizes) else (0, 0)
             page_reports.append(PageReport(
-                page=p + 1, ocr=any(u.ocr for u in units), blocks=len(pb),
-                score=round(sum(b.score for b in pb) / len(pb), 1) if pb else 100.0,
+                page=p + 1, width=w, height=h, ocr=any(u.ocr for u in units), blocks=len(pb), score=avg("score"),
+                translation_score=avg("translation_score"), layout_score=avg("layout_score"),
                 overflow=sum(b.fit.status == "overflow" for b in pb),
+                collisions=sum(any(i.category == "collision" for i in b.issues) for b in pb)
+                + render_info.get("output_overlaps", {}).get(p + 1, 0),
                 images_moved=int(p + 1 in render_info["pages_with_moved_images"])))
         s = self.s
         models = {"analyst": s.analyst_model, "translator": s.translator_model, "judge": s.judge_model,
                   "escalation": s.escalation_model} if not self.factory.pseudo else {"all": "pseudo (local, no tokens)"}
+        has = lambda cat: sum(any(i.category == cat for i in b.issues) for b in blocks)  # noqa: E731
         report = QualityReport(
-            score=round(doc_score, 1), threshold=s.quality_threshold, passed=doc_score >= s.quality_threshold,
+            score=round(headline, 1), translation_score=round(translation_score, 1),
+            layout_score=round(layout_score, 1), threshold=s.quality_threshold, passed=not reasons,
+            fail_reasons=reasons, collisions=collisions, output_overlaps=overlaps,
+            missing_glyph_blocks=has("missing_glyphs"), font_substituted_blocks=has("font_substituted"),
+            purpose=self.purpose,
             blocks_total=len(blocks), blocks_below_threshold=sum(not b.converged for b in blocks),
             blocks_refined=sum(any(a.stage == "refine" for a in b.attempts) for b in blocks),
             blocks_escalated=sum(any(a.stage == "escalate" for a in b.attempts) for b in blocks),
@@ -373,9 +605,9 @@ class TranslationPipeline:
             shrunk_blocks=sum(b.fit.status == "shrunk" for b in blocks),
             font_preserved_ratio=round(sum(b.font_preserved for b in blocks) / max(1, len(blocks)), 3),
             images_preserved=render_info["images_preserved"], issues_by_severity=sev,
-            judge_coverage=round(len(self.judged & {b.id for b in blocks}) / max(1, len(blocks)), 3), pages=page_reports,
-            usage_by_agent=self.usage, timings={k: round(v, 2) for k, v in self.timings.items()},
-            backend=s.backend, models=models)
+            judge_coverage=round(len(self.judged & {b.id for b in blocks}) / max(1, len(blocks)), 3),
+            pages=page_reports, usage_by_agent=self.usage,
+            timings={k: round(v, 2) for k, v in self.timings.items()}, backend=s.backend, models=models)
         return report, blocks
 
 

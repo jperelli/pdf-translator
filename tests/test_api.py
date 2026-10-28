@@ -49,9 +49,31 @@ def test_full_job(client):
     jid = job["id"]
     pdf = client.get(f"/api/jobs/{jid}/download")
     assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
-    png = client.get(f"/api/jobs/{jid}/pages/1.png?version=translated")
+    png = client.get(f"/api/jobs/{jid}/pages/1.png?which=translated")
     assert png.headers["content-type"] == "image/png"
     events = client.get(f"/api/jobs/{jid}/events").text
     for kind in ('"type": "analysis"', '"type": "page"', '"span": "agent"', '"type": "done"'):
         assert kind in events
     assert "event: end" in events
+
+
+def test_history_versions_and_redo(client):
+    r = client.post("/api/jobs", data={"target": "es", "sample": "08-jargon-en.pdf", "purpose": "understand"})
+    job = wait(client, r.json()["id"])
+    assert job["status"] == "done" and job["purpose"] == "understand"
+    jid = job["id"]
+    listed = client.get("/api/jobs").json()
+    assert any(j["id"] == jid and j["versions"] == 1 for j in listed["jobs"])
+    est = client.post(f"/api/jobs/{jid}/estimate", json={"terms": {"keep_original": ["holeshot"]}}).json()
+    assert est["tokens"] > 0
+    assert client.post(f"/api/jobs/{jid}/redo", json={"terms": {"keep_original": ["holeshot"]}}).status_code == 202
+    job2 = wait(client, jid)
+    assert job2["status"] == "done" and job2["version"] == 2 and len(job2["versions"]) == 2
+    v1 = client.get(f"/api/jobs/{jid}?version=1").json()
+    assert v1["shown_version"] == 1 and v1["result"]["version"] == 1
+    for v in (1, 2):
+        pdf = client.get(f"/api/jobs/{jid}/download?version={v}")
+        assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    assert client.post("/api/jobs", data={"target": "es", "sample": "01-simple-en.pdf", "purpose": "x"}).status_code == 422
+    assert client.delete(f"/api/jobs/{jid}").status_code == 200
+    assert client.get(f"/api/jobs/{jid}").status_code == 404

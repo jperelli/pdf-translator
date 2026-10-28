@@ -98,13 +98,77 @@ gold accent instead of the black Stark website look).
 - **Dependency pinning.** Versions published less than 7 days earlier (openai, fastapi, pytest) were pinned
   to the previous releases.
 
+### 1.4 Deploy
+
+> carga la variable OPENAI_API_KEY y deploya el repo en coolify, dame la url final
+
+**Result:** Coolify application from the public repo (Dockerfile build pack, health check `/api/health`),
+key as a runtime-only variable, deployed at https://pdf-translator.coffee.jperelli.com and checked with a
+real translation.
+
+### 1.5 "Overlapping text should be unacceptable": honest evaluation, missing glyphs, review loop
+
+> I need to understand how we are doing the evaluation, because for example I see this translation with a lot
+> of overlap in text, and that should be unacceptable. I send you also an example where it seems one
+> typography does not have special characters [...] Should we create the special characters that dont exist
+> in that typography somehow? [...] should we flag that and propose different alternatives at the end? [...]
+> Either way, overlapping text is not acceptable. [...] we need that final step of warnings/things that didnt
+> work and be able to choose some alternatives and redo with those decitions
+
+> ok, write that in a plan to implement things [...] how expensive the "Build accented letters from pieces of
+> the same font." is in terms of adding that by default [...] the end screen could be a stats screen [...]
+> a table of the previous runs [...] the log of the run [...] in a tab in the final screen [...] download
+> button on the top and the quality score [...] tabs: preview, details (jargon, refinement, stats, log),
+> review
+
+> Headline score show the lower; similar-font have both, if the bundled set works, use it, if not go to google
+> fonts to get one at runtime; add sqlite for persistence; use the real cv as a sample just change the name and
+> address, pii, leave the photo; hardcode current list prices yes. with that, start implementing the plan
+
+**Diagnosis (with evidence, before changing anything):**
+- The evaluation only *predicted* each block's fit in isolation and never looked at the written PDF. Two
+  blocks could grow into the same space, separators and underlines were not obstacles, and paragraphs split
+  by a symbol-font arrow were placed as separate fragments. A document with overlapping text scored ~100.
+- The "ANHÄNGE" bug was reproduced on the manual's StarkSans subset: the glyph test rendered each character
+  with `insert_text` and looked for ink, but PyMuPDF falls back to another font for missing glyphs, so the
+  test said yes even for a Chinese character. MuPDF then mixed a serif Ä into the word.
+
+**What was built:** extraction fixes (spaces between word objects, `<br>` for intentional line breaks,
+separators end paragraphs, underlines become `<u>` and move with their text, duplicate text layers dropped),
+space claims in reading order, MuPDF probes per block (real line boxes and fonts), collision detection on
+probes *and* on the written PDF, two scores with a hard gate, a fontTools font rebuilder that builds accents
+from the font's own pieces (no LLM), similar-font ranking (bundled OFL fonts, Google Fonts fallback), a
+Review tab with decisions and a redo that only reprocesses affected blocks, SQLite history and versions,
+per-call token/cost accounting with list prices, a Stats tab with SVG charts, and the understand/publish
+purpose.
+
+**Mistakes and dead ends on the way:**
+- First run of the new layout QA: 32 "collisions" on the manual. Most were false: line boxes include the
+  full ascender/descender and neighbouring lines touch by a point or two. Fixed by requiring a real share of
+  the line height. Two more classes of false positives followed: zero-height hairlines are "empty"
+  rectangles for PyMuPDF (so the underline exemption failed), and in Arabic the tall Naskh line boxes of one
+  paragraph overlap each other. Each one was found by looking at the flagged area, not by loosening limits.
+- Real ones remained: TOC page numbers share a "line" with their entry (split by a tab) and were not
+  obstacles, so a long Spanish entry ran over "20". Fixed by using line segments as obstacles. The read-back
+  of the written PDF is what caught it: the prediction had missed it.
+- A `round` parameter shadowed Python's `round()` inside the cost recorder; every agent call raised inside
+  the usage callback, was retried and split, and the run "succeeded" with 37 translator requests for 19
+  blocks. Visible in the trace counts, fixed by renaming.
+- The pseudo model accented every Latin target with the same letters (ñ, ç in German), which created fake
+  "missing glyph" warnings; it now only uses letters the target language has.
+- Similar-font ranking first took 11 s (decoding every glyph of Noto with fontTools) and penalised weight
+  so much that a wide display face (Michroma) lost to Montserrat for the wide StarkSans caps. Now only the
+  sample glyphs are decoded (0.3 s) and width/shape dominate.
+- The real CV PDF was not available in the sandbox (only a screenshot), so a synthetic `10-cv-like-en`
+  reproduces its structure. The anonymised real CV is pending.
+
 ---
 
 ## 2. Runtime prompts
 
-Status: version 1 of every prompt, written with the rationale below and validated on the first live eval
-runs (scores 95-100 on 02/03/05/06 into DE/AR/ZH/EN, see README). No prompt iteration has been driven by a
-failed live run yet; when one is, it is logged here with the before/after.
+Status: version 1 of every prompt validated on the first live eval runs (scores 95-100 on 02/03/05/06 into
+DE/AR/ZH/EN); version 2 adds line breaks, underlines and user instructions (see below), validated live on
+10-cv-like and 11-subset-heading into German (97.2 and 99.2, no overlaps).
 
 All are in `app/ai/prompts.py`; placeholders like `{target_name}` are filled per run from the typed run
 context (target language + document analysis). Inputs are JSON; outputs are strict JSON schemas
@@ -144,6 +208,15 @@ Goal: everything a translator needs that is not in a single page. Design decisio
   to flag preferential rewrites as errors; this keeps scores calibrated.
 - Layout is excluded ("checked elsewhere") so the judge does not double-penalize long text.
 - A different and stronger model than the translator, to reduce self-preference bias.
+
+### Translator and Refiner, v2 (layout round)
+
+- Added: keep `<u>` tags and every `<br>` line break (addresses, lists, a summary written line by line).
+  Before, extraction merged those lines and the translator had no way to know they were separate.
+- Added to the Refiner: blocks may carry an `instruction` from the user's review decisions ("use ONLY
+  these characters", "keep this term", "make it noticeably shorter"). It overrides the style rules but not
+  the meaning. The allowed character set for "rewrite with available characters" is the rebuilt font's real
+  coverage, so the model cannot pick a letter the font does not have.
 
 ### Refiner and Escalation
 

@@ -20,7 +20,7 @@ from agents.models.interface import Model
 from agents.usage import Usage
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseOutputText
 
-TOKEN = re.compile(r"(</?[bi]>|https?://\S+|[\w.+-]+@[\w-]+\.[\w.]+|\d[\d.,:/]*|\s+|[^\w\s]|\w+)", re.UNICODE)
+TOKEN = re.compile(r"(</?[biu]>|<br>|https?://\S+|[\w.+-]+@[\w-]+\.[\w.]+|\d[\d.,:/]*|\s+|[^\w\s]|\w+)", re.UNICODE)
 NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
 ACCENTS = str.maketrans("aeiouycnAEIOUYCN", "áéíöüýçñÁÉÍÖÜÝÇÑ")
 ARABIC = dict(zip("abcdefghijklmnopqrstuvwxyz", "ابتثجحخدذرزسشصضطظعغفقكلمنه"))
@@ -45,6 +45,23 @@ def _h(s: str) -> int:
     return int(hashlib.md5(s.encode()).hexdigest()[:8], 16)
 
 
+def _accents(target: str) -> dict[int, str]:
+    """Accent only with letters the target language really uses (German: äöü, Spanish: áéíóúñ...)."""
+    import unicodedata
+
+    from app.languages import LANGUAGES
+
+    lang = LANGUAGES.get(target)
+    if not lang or not lang.probe:
+        return {}
+    table = {}
+    for ch in lang.probe:
+        base = unicodedata.normalize("NFD", ch)[0]
+        if base.isalpha() and len(unicodedata.normalize("NFD", ch)) > 1 and ord(base) not in table:
+            table[ord(base)] = ch
+    return table
+
+
 def _word(w: str, target: str, i: int, pad: bool) -> str:
     script = SCRIPTS.get(target, "latin")
     if script == "latin" and not re.search(r"[A-Za-zÀ-ÿ]", w):  # non-Latin source word: fake a transliteration
@@ -57,7 +74,7 @@ def _word(w: str, target: str, i: int, pad: bool) -> str:
     if script == "cyrillic":
         out = "".join(CYRILLIC.get(c.lower(), c) for c in w)
     else:
-        out = w.translate(ACCENTS)
+        out = w.translate(_accents(target))
     if pad and len(w) > 2:
         out += ("en", "ung", "ör", "ïa", "esë")[i % 5]
     return out
@@ -145,7 +162,9 @@ def _analysis(payload: dict[str, Any]) -> dict[str, Any]:
         lang = "zh"
     else:
         lang = max(STOPWORDS, key=lambda k: sum(lower[w] for w in STOPWORDS[k]))
-    caps = Counter(w for w in words if len(w) >= 3 and (w.isupper() or w[0].isupper()))
+    # all-caps headings are not names: only count capitals inside mixed-case blocks
+    mixed = " ".join(b["text"] for b in payload.get("blocks", []) if not b["text"].isupper())
+    caps = Counter(w for w in re.findall(r"[^\W\d_]+", mixed) if len(w) >= 3 and (w.isupper() or w[0].isupper()))
     sentence_starts = {m.group(1) for m in re.finditer(r"(?:^|[.!?:]\s+)(\w+)", text)}
     protected = sorted(w for w, n in caps.items()
                        if (w.isupper() and len(w) <= 6 and n >= 1) or (n >= 2 and w not in sentence_starts
@@ -201,9 +220,10 @@ class PseudoModel(Model):
         elif self.role == "judge":
             outputs = [_message(_judge(payload, protected))]
         elif self.role == "translator":
-            inject = lambda bid: _h(bid) % 9 == 0  # noqa: E731 - ~11% of blocks get a mistake to fix
+            def inject(bid: str, text: str) -> bool:  # ~11% of blocks, plus a third of those with numbers
+                return _h(bid) % 9 == 0 or (bool(NUMBER.search(text)) and _h(bid) % 3 == 0)
             outputs = [_message({"translations": [
-                {"id": b["id"], "text": pseudo_translate(b["text"], target, protected, inject=inject(b["id"]))}
+                {"id": b["id"], "text": pseudo_translate(b["text"], target, protected, inject=inject(b["id"], b["text"]))}
                 for b in payload.get("blocks", [])]})]
         else:  # refiner / escalation: call the check_fit tool once per block, then answer
             outputs = self._refine(items, payload, target, protected, tools)
@@ -222,7 +242,16 @@ class PseudoModel(Model):
             out = []
             for n, b in enumerate(blocks):
                 budget = None if b.get("fits", True) else int(b.get("max_chars", 40))
+                if "shorter" in b.get("instruction", ""):
+                    budget = max(4, int(len(b.get("current", "")) * 0.6))
                 text = pseudo_translate(b["source"], target, protected, budget=budget)
+                m = re.search(r"Use ONLY these characters[^:]*: (.*?)\. Choose", b.get("instruction", ""))
+                if m:
+                    allowed = set(m.group(1)) | {" "}
+                    import unicodedata
+                    text = "".join(c if c in allowed or c in "<>/" else
+                                   (unicodedata.normalize("NFD", c)[0] if unicodedata.normalize("NFD", c)[0] in allowed else "")
+                                   for c in text)
                 out.append(ResponseFunctionToolCall(
                     id=f"fc_{n}", call_id=f"call_{n}_{_h(b['id'])}", type="function_call", name="check_fit",
                     arguments=json.dumps({"block_id": b["id"], "text": text}), status="completed"))

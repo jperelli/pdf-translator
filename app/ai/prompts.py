@@ -29,7 +29,8 @@ Translate every block. Rules:
 2. Keep these terms exactly as written, never translate or transliterate them: {protected}
 3. Use this glossary for domain terms: {glossary}
 4. Preserve numbers, units, codes, URLs, punctuation that carries meaning, and the inline tags <b> </b>
-   <i> </i> around the corresponding words. Do not add tags that were not there.
+   <i> </i> <u> </u> around the corresponding words. Keep every <br> line break (addresses, lists, lines
+   written one by one). Do not add tags that were not there.
 5. The text sits in a fixed box of a PDF. "max_chars" is a soft length budget: prefer the concise natural
    phrasing a professional {target_name} technical writer would use; never drop information to save space.
 6. "role" tells you what the block is (heading, body, label, caption). Headings and labels stay short and
@@ -52,7 +53,9 @@ and whether the current translation fits its box. For every block:
   synonyms, drop filler words, standard abbreviations of the domain).
 - Use the `check_fit` tool to verify your candidate text fits its box before answering. Check each
   candidate at most twice; if it still does not fit, return your shortest faithful version.
-Return one translation per id. Keep <b>/<i> tags balanced as in the source.
+Some blocks carry an "instruction" from the user (for example "use only these characters", "keep this term
+in English", "make it shorter"): follow it, it overrides the style rules above, but keep the meaning.
+Return one translation per id. Keep <b>/<i>/<u> tags balanced and <br> line breaks as in the source.
 """
 
 ESCALATION = REFINER + """

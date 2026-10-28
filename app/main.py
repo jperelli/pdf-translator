@@ -17,6 +17,8 @@ from app.config import get_settings
 from app.formats import InvalidDocument, detect
 from app.jobs import JobStore
 from app.languages import LANGUAGES
+from app.models import BlockResult
+from app.review import estimate_tokens
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 settings = get_settings()
@@ -88,9 +90,11 @@ def samples():
 
 @app.post("/api/jobs", status_code=202)
 async def create_job(request: Request, target: str = Form(...), file: UploadFile | None = File(None),
-                     sample: str | None = Form(None)):
+                     sample: str | None = Form(None), purpose: str = Form("publish")):
     if target not in LANGUAGES:
         raise HTTPException(422, f"Unsupported target language: {target}")
+    if purpose not in ("understand", "publish"):
+        raise HTTPException(422, "purpose must be 'understand' or 'publish'.")
     limit = settings.max_upload_mb * 1024 * 1024
     if sample:
         path = SAMPLES / Path(sample).name
@@ -118,14 +122,75 @@ async def create_job(request: Request, target: str = Form(...), file: UploadFile
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(422, "The file is not a readable PDF (it may be corrupted or truncated).") from exc
-    job = request.app.state.jobs.create(name, target, data)
+    job = request.app.state.jobs.create(name, target, data, purpose)
     return job.summary()
 
 
+@app.get("/api/jobs")
+def list_jobs(request: Request, limit: int = 50, offset: int = 0):
+    rows, total = request.app.state.jobs.db.list_jobs(max(1, min(limit, 200)), max(0, offset))
+    live = request.app.state.jobs.jobs
+    for r in rows:  # live status wins over the persisted one while a job runs
+        if r["id"] in live:
+            r["status"] = live[r["id"]].status
+    return {"jobs": rows, "total": total}
+
+
 @app.get("/api/jobs/{job_id}")
-def get_job(request: Request, job_id: str):
+def get_job(request: Request, job_id: str, version: int | None = None):
     job = _job(request, job_id)
-    return {**job.summary(), "result": job.result}
+    versions = request.app.state.jobs.db.list_versions(job_id)
+    result, events = job.result, job.events
+    if version is not None and version != job.version:
+        v = request.app.state.jobs.db.version(job_id, version)
+        if not v:
+            raise HTTPException(404, "No such version.")
+        result, events = v["result"], v["events"]
+    return {**job.summary(), "result": result, "versions": versions, "events": events,
+            "shown_version": version or job.version}
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(request: Request, job_id: str):
+    job = _job(request, job_id)
+    if job.status in ("queued", "running"):
+        raise HTTPException(409, "The job is still running.")
+    request.app.state.jobs.delete(job_id)
+    return {"deleted": job_id}
+
+
+@app.post("/api/jobs/{job_id}/pin")
+def pin_job(request: Request, job_id: str, pinned: bool = True):
+    _job(request, job_id)
+    request.app.state.jobs.db.pin(job_id, pinned)
+    return {"pinned": pinned}
+
+
+@app.post("/api/jobs/{job_id}/estimate")
+async def estimate(request: Request, job_id: str):
+    job = _job(request, job_id)
+    if not job.result:
+        raise HTTPException(409, "Nothing to redo yet.")
+    decisions = await request.json()
+    blocks = {b["id"]: BlockResult.model_validate(b) for b in job.result["blocks"]}
+    tokens = estimate_tokens(decisions, blocks)
+    model = settings.translator_model
+    pin, pout = settings.price(model)
+    return {"tokens": tokens, "cost_usd": round(tokens * 0.6 * pin / 1e6 + tokens * 0.4 * pout / 1e6, 4),
+            "model": model if settings.backend == "openai" else "pseudo"}
+
+
+@app.post("/api/jobs/{job_id}/redo", status_code=202)
+async def redo(request: Request, job_id: str):
+    job = _job(request, job_id)
+    decisions = await request.json()
+    if not isinstance(decisions, dict):
+        raise HTTPException(422, "Decisions must be a JSON object.")
+    try:
+        request.app.state.jobs.redo(job, decisions)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return job.summary()
 
 
 @app.get("/api/jobs/{job_id}/events")
@@ -158,20 +223,33 @@ async def job_events(request: Request, job_id: str):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def _output(job, version: int | None):
+    v = version or job.version
+    path = job.output(v)
+    if not path.exists() and version is None:  # the latest version failed: fall back to the newest file
+        for older in range(v - 1, 0, -1):
+            if job.output(older).exists():
+                return job.output(older), older
+    return path, v
+
+
 @app.get("/api/jobs/{job_id}/download")
-def download(request: Request, job_id: str, inline: bool = False):
+def download(request: Request, job_id: str, inline: bool = False, version: int | None = None):
     job = _job(request, job_id)
-    if job.status != "done" or not job.output.exists():
+    path, v = _output(job, version)
+    if not path.exists():
         raise HTTPException(409, "The translation is not ready yet.")
     stem = Path(job.filename).stem
-    return FileResponse(job.output, media_type="application/pdf", filename=f"{stem}.{job.target}.pdf",
+    suffix = f".v{v}" if v > 1 else ""
+    return FileResponse(path, media_type="application/pdf", filename=f"{stem}.{job.target}{suffix}.pdf",
                         content_disposition_type="inline" if inline else "attachment")
 
 
 @app.get("/api/jobs/{job_id}/pages/{page}.png")
-def page_image(request: Request, job_id: str, page: int, version: str = "original", dpi: int = 80):
+def page_image(request: Request, job_id: str, page: int, which: str = "original", version: int | None = None,
+               dpi: int = 80):
     job = _job(request, job_id)
-    path = job.output if version == "translated" else job.source
+    path = _output(job, version)[0] if which == "translated" else job.source
     if not path.exists():
         raise HTTPException(409, "Not available yet.")
     with pymupdf.open(path) as doc:

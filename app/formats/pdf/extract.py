@@ -24,6 +24,8 @@ def is_rtl(text: str) -> bool:
 
 def word_count(text: str) -> int:
     return max(len(text.split()), len(CJK_CHAR.findall(text)) // 2)
+
+
 SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
 
 
@@ -60,6 +62,22 @@ def needs_translation(text: str) -> bool:
     return len(LETTER.findall(text)) >= 2
 
 
+def _needs_space(prev: dict, cur: dict) -> bool:
+    """Many PDFs (CV builders, browsers) store words as separate objects with no space character."""
+    if not prev["text"] or not cur["text"] or prev["text"][-1].isspace() or cur["text"][0].isspace():
+        return False
+    return cur["bbox"][0] - prev["bbox"][2] > 0.15 * min(prev["size"], cur["size"])
+
+
+def join_spans(spans: list[dict], render) -> str:
+    out = []
+    for i, s in enumerate(spans):
+        if i and _needs_space(spans[i - 1], s):
+            out.append(" ")
+        out.append(render(s))
+    return "".join(out)
+
+
 @dataclass
 class Segment:
     """A horizontal run of spans on one line (a line split at tabs / big gaps)."""
@@ -70,7 +88,7 @@ class Segment:
 
     @property
     def text(self) -> str:
-        return "".join(s["text"] for s in self.spans).replace("\t", " ").strip()
+        return join_spans(self.spans, lambda s: s["text"]).replace("\t", " ").strip()
 
     @property
     def size(self) -> float:
@@ -89,7 +107,7 @@ class Group:
         return r
 
 
-def _split_line(line: dict) -> list[Segment]:
+def split_line(line: dict) -> list[Segment]:
     spans = [s for s in line["spans"] if s["text"].strip()]
     if not spans:
         return []
@@ -109,7 +127,7 @@ def _split_line(line: dict) -> list[Segment]:
     return segs
 
 
-def _continues(group: Group, seg: Segment) -> bool:
+def _continues(group: Group, seg: Segment, rules: list[pymupdf.Rect]) -> bool:
     """Does `seg` (next line) belong to the same paragraph as `group`?"""
     last = group.segments[-1]
     if not (last.full_line and seg.full_line):
@@ -129,8 +147,23 @@ def _continues(group: Group, seg: Segment) -> bool:
         return False
     # an indented first line after a full line starts a new paragraph (mirrored for RTL scripts)
     indent = first.x1 - seg.bbox.x1 if is_rtl(seg.text) else seg.bbox.x0 - first.x0
-    if indent > 1.0 * last.size and len(group.segments) > 1:
+    right_aligned = all(abs(x.bbox.x1 - seg.bbox.x1) < 0.5 * last.size for x in group.segments)
+    if indent > 1.0 * last.size and len(group.segments) > 1 and not right_aligned:
         return False
+    # a separator line between the two lines ends the paragraph
+    for r in rules:
+        if last.bbox.y1 - 1 <= r.y0 <= seg.bbox.y0 + 1 and min(r.x1, seg.bbox.x1) - max(r.x0, seg.bbox.x0) > 0 \
+                and not any(underline_for(sp, [r]) for sp in last.spans):
+            return False
+    # a change of indentation after the first lines (list item vs. sub-item) starts a new unit
+    if len(group.segments) > 1 and abs(seg.bbox.x0 - last.bbox.x0) > last.size and \
+            abs(seg.bbox.x1 - last.bbox.x1) > last.size and not is_rtl(seg.text):
+        return False
+    if len(group.segments) == 1 and seg.bbox.x0 - last.bbox.x0 > last.size and \
+            abs(seg.bbox.x1 - last.bbox.x1) > last.size:
+        return False  # the second line is indented more than the first: a sub-item, not a wrap
+    if last.bbox.x0 - seg.bbox.x0 > last.size and last.text.rstrip()[-1:] in ".:;!?" and not is_rtl(seg.text):
+        return False  # back to a smaller indent after a finished sentence: next item
     # a short single line in another font/colour (heading, label, footer) is its own unit
     a, b = last.spans[0], seg.spans[0]
     if len(group.segments) == 1 and len(last.text) < 60 and (a["font"], a["color"]) != (b["font"], b["color"]):
@@ -138,27 +171,62 @@ def _continues(group: Group, seg: Segment) -> bool:
     return True
 
 
-def _markup(spans: list[dict], bold: bool, italic: bool) -> str:
-    parts = []
-    for s in spans:
+def underline_for(span: dict, rules: list[pymupdf.Rect]) -> pymupdf.Rect | None:
+    """A thin horizontal vector line just below the span's baseline, covering most of its width."""
+    base, size = span["origin"][1], span["size"]
+    x0, x1 = span["bbox"][0], span["bbox"][2]
+    for r in rules:
+        if base - 0.15 * size <= r.y0 <= base + 0.45 * size and min(r.x1, x1) - max(r.x0, x0) >= 0.6 * (x1 - x0):
+            return r
+    return None
+
+
+def _markup(spans: list[dict], bold: bool, italic: bool, rules: list[pymupdf.Rect], used: list) -> str:
+    def render(s: dict) -> str:
         t = escape(s["text"].replace("\t", " "), quote=False)
         if is_bold(s) and not bold:
             t = f"<b>{t}</b>"
         if is_italic(s) and not italic:
             t = f"<i>{t}</i>"
-        parts.append(t)
-    return "".join(parts)
+        u = underline_for(s, rules) if t.strip() else None
+        if u is not None:
+            used.append(u)
+            t = f"<u>{t}</u>"
+        return t
+    return re.sub(r"</u>(\s*)<u>", r"\1", join_spans(spans, render))
 
 
-def _join_lines(lines: list[str]) -> str:
+def _join_lines(lines: list[str], breaks: list[bool] | None = None) -> str:
+    """Join wrapped lines; `breaks[i]` marks an intentional line break after line i (kept as <br>)."""
     text = lines[0].strip()
-    for nxt in lines[1:]:
+    for i, nxt in enumerate(lines[1:]):
         nxt = nxt.strip()
-        if text.endswith("-") and nxt[:1].islower():
+        if breaks and breaks[i]:
+            text = f"{text}<br>{nxt}"
+        elif text.endswith("-") and nxt[:1].islower():
             text = text[:-1] + nxt
         else:
             text = f"{text} {nxt}"
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def _hard_breaks(group: Group, align: str) -> list[bool]:
+    """A line that ends early although the next line's first word would have fitted was broken on purpose
+    (addresses, list items, a summary written line by line)."""
+    bb = group.bbox
+    if align in ("right", "center"):  # ragged-left text (addresses, contact blocks) is broken by hand
+        return [True] * (len(group.segments) - 1)
+    out = []
+    for seg, nxt in zip(group.segments, group.segments[1:]):
+        words = nxt.text.split()
+        if not words or not nxt.text:
+            out.append(False)
+            continue
+        char_w = nxt.bbox.width / max(1, len(nxt.text))
+        need = (len(words[0]) + 1) * char_w
+        free = {"right": seg.bbox.x0 - bb.x0, "center": bb.width - seg.bbox.width}.get(align, bb.x1 - seg.bbox.x1)
+        out.append(free > need + 0.5 * seg.size)
+    return out
 
 
 def _align(group: Group) -> str:
@@ -169,7 +237,9 @@ def _align(group: Group) -> str:
     lefts = [abs(s.bbox.x0 - bb.x0) for s in group.segments]
     rights = [abs(bb.x1 - s.bbox.x1) for s in group.segments]
     tol = group.segments[0].size * 0.6
-    if all(x < tol for x in lefts[:-1]) and all(x < tol for x in rights[:-1]) and len(group.segments) > 2:
+    # justified only when several full lines end exactly at the same edge (two can match by chance)
+    if len(group.segments) >= 4 and all(x < tol for x in lefts[:-1]) and \
+            all(x < group.segments[0].size * 0.25 for x in rights[:-1]):
         return "justify"
     if all(x < tol for x in (rights if rtl else lefts)):
         return "right" if rtl else "left"
@@ -177,6 +247,43 @@ def _align(group: Group) -> str:
         return "left" if rtl else "right"
     centers = [abs((s.bbox.x0 + s.bbox.x1) / 2 - (bb.x0 + bb.x1) / 2) for s in group.segments]
     return "center" if all(c < tol for c in centers) else "left"
+
+
+def _drop_duplicates(groups: list[Group]) -> list[Group]:
+    """Some PDFs draw the same text twice (link styling, fake bold): keep one copy."""
+    out: list[Group] = []
+    for g in groups:
+        text = " ".join(s.text for s in g.segments)
+        bb = g.bbox
+        dup = False
+        for h in out:
+            hb = h.bbox
+            inter = bb & hb
+            if inter.is_empty:
+                continue
+            ht = " ".join(s.text for s in h.segments)
+            if (text in ht or ht in text) and inter.get_area() > 0.6 * min(bb.get_area(), hb.get_area()):
+                if len(text) > len(ht):  # keep the longer copy
+                    out[out.index(h)] = g
+                dup = True
+                break
+        if not dup:
+            out.append(g)
+    return out
+
+
+def rules_on(page: pymupdf.Page) -> list[pymupdf.Rect]:
+    """Thin horizontal vector lines: separators and underlines."""
+    out = []
+    for d in page.get_drawings():
+        r = d.get("rect")
+        if r is not None and r.height <= 2.5 and r.width >= 4:
+            r = pymupdf.Rect(r)
+            if r.height < 0.5:  # hairlines are zero-height rects, which PyMuPDF treats as empty
+                cy = (r.y0 + r.y1) / 2
+                r.y0, r.y1 = cy - 0.25, cy + 0.25
+            out.append(r)
+    return out
 
 
 def _containers(page: pymupdf.Page) -> list[pymupdf.Rect]:
@@ -268,6 +375,7 @@ def extract_page(page: pymupdf.Page, ocr_language: str = "eng") -> list[TextUnit
         return _ocr_units(page, ocr_language)
     data = page.get_text("dict", flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES & ~pymupdf.TEXT_PRESERVE_LIGATURES)
     containers = _containers(page)
+    rules = rules_on(page)
 
     groups: list[Group] = []
     current: Group | None = None
@@ -277,14 +385,15 @@ def extract_page(page: pymupdf.Page, ocr_language: str = "eng") -> list[TextUnit
         for line in block["lines"]:
             if abs(line["dir"][1]) > 0.01 or line.get("wmode", 0):
                 continue  # rotated / vertical text is left untouched (documented limitation)
-            for seg in _split_line(line):
-                if current and _continues(current, seg) and \
+            for seg in split_line(line):
+                if current and _continues(current, seg, rules) and \
                         _container_for(seg.bbox, containers) == _container_for(current.bbox, containers):
                     current.segments.append(seg)
                 else:
                     current = Group([seg])
                     groups.append(current)
 
+    groups = _drop_duplicates(groups)
     sizes = [s.size for g in groups for s in g.segments]
     body_size = statistics.median(sizes) if sizes else 10
     units = []
@@ -298,7 +407,10 @@ def extract_page(page: pymupdf.Page, ocr_language: str = "eng") -> list[TextUnit
             key = (s["font"], round(s["size"], 1), s["color"], is_bold(s), is_italic(s), s["flags"])
             weights[key] = weights.get(key, 0) + len(s["text"])
         font, size, color, bold, italic, flags = max(weights, key=weights.get)
-        text = _join_lines([_markup(seg.spans, bold, italic) for seg in g.segments])
+        align = _align(g)
+        breaks = _hard_breaks(g, align)
+        decorations: list[pymupdf.Rect] = []
+        text = _join_lines([_markup(seg.spans, bold, italic, rules, decorations) for seg in g.segments], breaks)
         baselines = [seg.spans[0]["origin"][1] for seg in g.segments]
         lh = statistics.median([b - a for a, b in zip(baselines, baselines[1:])]) / size if len(baselines) > 1 else 1.2
         bbox = g.bbox
@@ -314,11 +426,12 @@ def extract_page(page: pymupdf.Page, ocr_language: str = "eng") -> list[TextUnit
             text=text,
             style=Style(
                 font=SUBSET_PREFIX.sub("", font), family=font_family(font, flags), size=size,
-                color=hex_color(color), bold=bold, italic=italic, align=_align(g),
+                color=hex_color(color), bold=bold, italic=italic, align=align,
                 line_height=min(max(lh, 1.0), 2.2),
             ),
             role=role,
             container=tuple(container) if container else None,
+            decorations=[tuple(r) for r in decorations],
         ))
     return units
 

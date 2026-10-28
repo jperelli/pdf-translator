@@ -241,6 +241,118 @@ def jargon_en() -> pymupdf.Document:
     return doc
 
 
+def _words(page: pymupdf.Page, x: float, y: float, text: str, size: float, font: str = "helv",
+           color=(0, 0, 0), align_right: float | None = None) -> float:
+    """Write each word as its own text object with no space characters, the way many CV builders and
+    browsers' "print to PDF" do. Returns the x after the last word."""
+    f = pymupdf.Font(font)
+    gap = f.text_length(" ", size)
+    width = sum(f.text_length(w, size) for w in text.split()) + gap * (len(text.split()) - 1)
+    if align_right is not None:
+        x = align_right - width
+    for w in text.split():
+        page.insert_text((x, y), w, fontsize=size, fontname=font, color=color)
+        x += f.text_length(w, size) + gap
+    return x
+
+
+def cv_en() -> pymupdf.Document:
+    """CV-like page reproducing what broke in a real CV: words without space characters, a two-column
+    header on a dark band, right-aligned contact lines with underlined links, a summary whose line breaks
+    carry the structure, separators, an underlined section title, a job row with a right-aligned date,
+    and arrows in a different font inside paragraphs."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    W = A4.width
+    _words(p, 0, 34, "Last update Sep 2026", 6, align_right=W - 120)
+    band = pymupdf.Rect(0, 46, W, 132)
+    p.draw_rect(band, fill=(0.33, 0.34, 0.42), color=None)
+    p.draw_circle((88, 89), 32, fill=(0.75, 0.72, 0.68), color=(1, 1, 1), width=1.5)
+    white = (1, 1, 1)
+    _words(p, 130, 76, "Jordan Example", 13, "hebo", white)
+    _words(p, 130, 93, "Principal Software Engineer", 11, color=white)
+    _words(p, 130, 112, "Italian/Argentinian in Spain", 8, color=white)
+    _words(p, 130, 123, "16 years of experience in javascript, python, +", 8, color=white)
+    right = W - 60
+    for i, (line, link) in enumerate([("jordan@example.com", False), ("+34 600 000 000", False),
+                                      ("Example Street 1, 2-3", False), ("Barcelona, Spain", False),
+                                      ("https://github.com/example", True), ("https://example.com", True)]):
+        y = 60 + i * 11.5
+        x1 = _words(p, 0, y, line, 6.5, color=white, align_right=right)
+        if link:
+            p.draw_line((x1 - pymupdf.Font("helv").text_length(line, 6.5) - 1.5, y + 1.5), (right, y + 1.5),
+                        color=(0.85, 0.8, 0.5), width=0.5)
+    # summary with a vertical rule on the left and separators between parts
+    p.draw_line((70, 150), (70, 300), color=(0.75, 0.75, 0.75), width=0.6)
+    _words(p, 78, 166, "16 years of experience building web, frontend, backend, databases, mobile.", 8.5)
+    _words(p, 78, 177, "Team player. Coder, architect and ad hoc management. Autonomous problem-solver.", 8.5)
+    p.draw_line((76, 184), (480, 184), color=(0.85, 0.85, 0.85), width=0.5)
+    _words(p, 78, 196, "Alma Mater: National Technological University, Argentina", 8.5)
+    p.draw_line((76, 203), (480, 203), color=(0.85, 0.85, 0.85), width=0.5)
+    _words(p, 78, 215, "Top Programming skills:", 8.5)
+    _words(p, 90, 226, "Javascript/Typescript, CSS/SCSS, Python/Django, Postgresql/Mysql/Mongodb.", 8.5)
+    _words(p, 78, 238, "Top Soft skills:", 8.5)
+    _words(p, 90, 249, "Mentoring. Team communication facilitator, fostering collaboration and unity.", 8.5)
+    _words(p, 90, 260, "Requirements analysis with stakeholders to simplify engineering complexity.", 8.5)
+    _words(p, 90, 271, "Very autonomous and persistent problem-solver.", 8.5)
+    # section title, underlined with a vector line
+    x1 = _words(p, 62, 322, "Work Experience", 9.5, "hebo")
+    p.draw_line((62, 324.5), (x1 - 2, 324.5), color=(0, 0, 0), width=0.6)
+    # job row: logo, bold title + right date, company + right detail
+    p.draw_rect(pymupdf.Rect(62, 334, 84, 356), fill=(0.55, 0.8, 0.7), color=None)
+    p.draw_rect(pymupdf.Rect(86, 334, 108, 356), fill=(0.75, 0.1, 0.15), color=None)
+    _words(p, 114, 343, "Principal Software Engineer", 8.5, "hebo")
+    _words(p, 340, 343, "2023 - current (4 years)", 7)
+    _words(p, 114, 354, "examplebet.ag [Example subsidiary] - Online gaming", 8.5)
+    _words(p, 340, 354, "Remote, distributed team", 7)
+    # paragraphs with inline bold and arrows in another font; each "- " item starts a new line
+    html(p, (62, 366, 520, 470),
+         "<div style='font-family:sans-serif;font-size:8.5pt;line-height:1.3'>"
+         "I serve as the link between the Architects team, the Product Owner and the developers adding technical "
+         "details and scope of tasks for an engineering team of 8+. I also help the team <b>adopt AI tools and "
+         "processes</b> and solve the most <b>complex technical</b> challenges.<br>"
+         "<u>Key achievements:</u><br>"
+         "- DevEx: Cut backend build times from 15 <span style='font-family:serif'>→</span> 5 minutes, introduced "
+         "HMR and css precompilation to reduce dev feedback loop from 10 min <span style='font-family:serif'>→</span>"
+         " 10 sec, <b>massively boosting developer velocity</b>.<br>"
+         "- Increased TypeScript coverage from 20% <span style='font-family:serif'>→</span> 80% (backend) and 0% "
+         "<span style='font-family:serif'>→</span> 40% (frontend), reducing bugs and <b>improving code "
+         "maintainability</b>.<br>"
+         "- <b>Mentored team members</b> via 1:1 hands-on sessions and drove adoption of technical best "
+         "practices.</div>")
+    p.draw_line((62, 478), (520, 478), color=(0.85, 0.85, 0.85), width=0.5)
+    x1 = _words(p, 62, 494, "Technologies", 9, "hebo")
+    p.draw_line((62, 496.5), (x1 - 2, 496.5), color=(0, 0, 0), width=0.6)
+    _words(p, 62, 508, "Javascript/Typescript, Nodejs, NestJS, MongoDB, NextJS, Svelte, CSS, Vite, Jest, Bash,", 8.5)
+    _words(p, 62, 519, "Kubernetes, Docker compose, K6, ArgoCD, Jenkins.", 8.5)
+    p.draw_line((62, 530), (520, 530), color=(0.85, 0.85, 0.85), width=0.5)
+    return doc
+
+
+def subset_heading_en() -> pymupdf.Document:
+    """Headings in an embedded font subset that only has the letters of the English text (no umlauts,
+    no accents), like the Stark manual's StarkSans: translating to German/Spanish needs glyphs it lacks."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    header(p, "Appendixes", 1)
+    tw = pymupdf.TextWriter(p.rect)
+    heading = pymupdf.Font(fontbuffer=pymupdf.Font("cobo").buffer)  # Courier-Bold as a distinctive face
+    tw.append((60, 110), "APPENDIXES", font=heading, fontsize=22)
+    tw.append((60, 330), "CONTROLS AND DISPLAY", font=heading, fontsize=18)
+    tw.write_text(p)
+    for i, (num, txt, pg) in enumerate([("I", "Declaration of conformity", 118), ("II", "FCC statement", 120),
+                                        ("III", "License agreement", 122), ("IV", "Data protection", 127),
+                                        ("V", "Warranty", 138), ("VI", "Disclaimer", 141)]):
+        y = 150 + i * 22
+        p.insert_text((60, y), num, fontsize=8, fontname="helv", color=(0.5, 0.5, 0.5))
+        p.insert_text((100, y), txt, fontsize=11, fontname="helv")
+        p.insert_text((440, y), str(pg), fontsize=10, fontname="hebo", color=(0.4, 0.4, 0.4))
+    html(p, (60, 345, 540, 420), "<p style='font-size:11pt;font-family:sans-serif'>Use the display to switch "
+         "between ride modes. Hold the mode button for three seconds to open the settings menu.</p>")
+    doc.subset_fonts()  # embed only the glyphs used: the heading font loses every letter it did not need
+    return doc
+
+
 def scanned_en() -> pymupdf.Document:
     """A text-only-as-pixels version of the simple sample: forces the OCR path."""
     src = simple_en()
@@ -276,6 +388,11 @@ SAMPLES = {
     "07-scanned-en.pdf": (scanned_en, "Scanned page with no text layer: OCR path.", ["es"]),
     "08-jargon-en.pdf": (jargon_en, "Brand names (Stark, VARG) and MX slang (holeshot, whoops, berm, brap).",
                          ["es", "de"]),
+    "10-cv-like-en.pdf": (cv_en, "CV layout: words stored without spaces, two-column header on a dark band, "
+                          "underlined links and titles, separators, structured summary, symbol-font arrows. "
+                          "Collision regression test.", ["es", "de"]),
+    "11-subset-heading-en.pdf": (subset_heading_en, "Headings in a font subset without umlauts/accents: "
+                                 "missing-glyph regression test.", ["de", "es"]),
 }
 
 

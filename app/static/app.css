@@ -128,3 +128,70 @@ td { padding: 8px; border-bottom: 1px solid #efeee9; vertical-align: top; }
 .check { font-size: 13.5px; color: var(--body); display: block; margin-bottom: 12px; }
 .foot { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
 [hidden] { display: none !important; }
+
+/* ---- v2: navigation, purpose, result top bar, details, review, history ---- */
+.nav { display: flex; align-items: center; gap: 18px; }
+.nav a { color: var(--body); text-decoration: none; font-size: 14px; padding-bottom: 2px; border-bottom: 2px solid transparent; }
+.nav a.active, .nav a:hover { color: var(--ink); border-color: var(--gold); }
+.purpose { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.purpose-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  background: #fff; cursor: pointer; font-size: 13px; color: var(--body); position: relative; padding-left: 36px; }
+.purpose-card input { position: absolute; left: 12px; top: 14px; accent-color: var(--gold-ink); }
+.purpose-card b { color: var(--ink); font-size: 14px; }
+.purpose-card:has(input:checked) { border-color: var(--gold); background: var(--gold-soft); }
+@media (max-width: 760px) { .purpose { grid-template-columns: 1fr; } }
+.result-top { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.score-block { display: flex; align-items: center; gap: 16px; }
+.score-label { font-size: 13px; color: var(--body); }
+.subscores { display: flex; gap: 12px; font-size: 13.5px; margin-top: 2px; }
+.reasons { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12.5px; margin-top: 4px; }
+.reasons span { padding: 1px 8px; border-radius: 10px; background: var(--panel2); }
+.ok { color: var(--ok); } .mid { color: var(--warn); } .bad { color: var(--bad); }
+.result-meta { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 10px; }
+#versions a { color: var(--body); margin-left: 6px; text-decoration: none; border-bottom: 1px dotted var(--muted); }
+#versions a.current { color: var(--ink); font-weight: 600; border-bottom: 2px solid var(--gold); }
+.badge { display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--warn); color: #fff; font-size: 11px; line-height: 18px; text-align: center; margin-left: 4px; }
+.badge.crit { background: var(--bad); }
+.subtabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.subtab { font: inherit; font-size: 13.5px; border: 1px solid var(--line); background: #fff; border-radius: 16px; padding: 4px 12px; cursor: pointer; color: var(--body); }
+.subtab.active { border-color: var(--gold); background: var(--gold-soft); color: var(--ink); }
+.check.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 0 18px; }
+.overlay-wrap { position: relative; }
+#overlay { position: absolute; inset: 0; pointer-events: none; }
+#overlay svg { width: 100%; height: 100%; display: block; }
+#overlay rect { fill: rgba(168, 112, 42, .12); stroke: var(--warn); stroke-width: 1.2; vector-effect: non-scaling-stroke; pointer-events: all; cursor: pointer; }
+#overlay rect.crit { fill: rgba(176, 74, 67, .15); stroke: var(--bad); }
+.block.flash { box-shadow: 0 0 0 3px var(--gold); transition: box-shadow .3s; }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.chart { display: block; margin: 6px 0 2px; overflow: visible; }
+.chart .lbl { font-size: 11px; fill: var(--body); }
+.chart .val { font-size: 11px; fill: var(--muted); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--body); margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+tr.total td { font-weight: 600; border-top: 1px solid var(--line); }
+.log.tall { max-height: 520px; }
+.chip.on { border-color: var(--gold); background: var(--gold-soft); color: var(--ink); }
+.review-item { border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 10px; padding: 12px 16px; margin: 12px 0; background: #fff; }
+.review-item.critical { border-left-color: var(--bad); }
+.review-item.warning { border-left-color: var(--warn); }
+.review-item.info { border-left-color: var(--gold); }
+.review-item h4 { margin: 0 0 4px; font-size: 15px; }
+.review-item a { color: var(--gold-ink); }
+.options { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.option { display: flex; align-items: center; gap: 10px; font-size: 13.5px; cursor: pointer; }
+.option.with-preview img { height: 26px; border: 1px solid var(--line); border-radius: 4px; background: #fff; margin-left: auto; }
+.pill { font-size: 11px; padding: 0 7px; border-radius: 8px; background: rgba(168, 112, 42, .12); color: var(--warn); margin-left: 4px; }
+.pill.free { background: rgba(95, 122, 58, .12); color: var(--ok); }
+.edits { display: grid; gap: 8px; margin-top: 10px; }
+.edits label { font-size: 12px; color: var(--muted); display: grid; gap: 3px; }
+.edits textarea { font: inherit; font-size: 13.5px; min-height: 52px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.term.toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.redo-bar { display: flex; justify-content: flex-end; align-items: center; gap: 14px; position: sticky; bottom: 0;
+  background: var(--panel); padding: 12px 0; border-top: 1px solid var(--line); margin-top: 8px; }
+.table-wrap { overflow-x: auto; margin-top: 14px; }
+#history-table td.fname { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#history-table td.actions { white-space: nowrap; }
+#history-table td.actions a { margin-right: 8px; color: var(--gold-ink); }
+#history-table td.actions a.bad { color: var(--bad); }
+.status { font-size: 12px; padding: 1px 8px; border-radius: 8px; background: var(--panel2); }
+.status.done { color: var(--ok); } .status.error { color: var(--bad); } .status.running, .status.queued { color: var(--warn); }

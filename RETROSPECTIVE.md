@@ -16,6 +16,11 @@
   decided after translating, which made the measurements and the final render disagree.
 - **Check model parameters against the live API early** (`reasoning.effort` values differ between model
   families). A 3-line probe script would have saved a failed run.
+- **Evaluate the artifact, not the plan.** The first evaluation scored predictions (does each block fit its
+  own box?) and a CV with overlapping text scored ~100. Reading the written PDF back is cheap and it is the
+  only check that cannot be fooled by a wrong assumption in the layout code.
+- **Two scores from the start.** Mixing translation quality and layout into one average hid a broken page
+  behind 180 good blocks. The headline should be the weakest dimension, with a hard gate on overlaps.
 - **What I would keep:** code orchestration with agents only where judgement is needed, error lists (MQM)
   instead of scores, a tool that lets the reviser ask the layout engine, and a small adversarial corpus
   where each sample fails in a different way.

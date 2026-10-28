@@ -25,10 +25,17 @@ run against a local pseudo-translation model (zero tokens, see [Pseudo mode](#ps
 6. **Fixes** what failed (Refiner agent, which calls a `check_fit` tool to verify its text fits), at most
    N rounds; blocks that still do not converge are **escalated** to a stronger model that also sees the
    page image. The best attempt of each block wins.
-7. **Rebuilds** the PDF: original text removed without touching images or vector graphics, translated
-   text written into the same boxes, then checks that every image is still where it was.
-8. Shows a **quality score**, the decisions taken, every issue found, a side-by-side preview, tokens per
-   agent and a live agent trace.
+7. **Lays out every page** in reading order: each block claims the space its text really uses, so two
+   blocks never grow into the same area; separators, underlines, images and frames are obstacles. Collisions
+   found here go back into the loop like any other failure.
+8. **Rebuilds** the PDF (original text removed without touching images or vector graphics; underlines move
+   with their text) and **reads the result back**: overlapping lines, the fonts MuPDF really used, images
+   in place.
+9. Shows **two scores**, translation quality and layout fidelity, with the lower one as the headline; a
+   single overlap fails the document. A **Review** tab lists what did not work with alternatives, and
+   **Apply and redo** creates a new version reprocessing only the affected blocks.
+10. Keeps every run and version in SQLite: a **History** screen, per-version downloads, and **Stats** with the
+    tokens and estimated cost of evaluation, back and forth, each page, the whole document and the glyph builder.
 
 ## Testing guide (for reviewers)
 
@@ -37,20 +44,35 @@ run against a local pseudo-translation model (zero tokens, see [Pseudo mode](#ps
 
 | Try | What to look at |
 |---|---|
-| `08-jargon-en` → Spanish or German | **Decisions** tab: Stark, Stark VARG, Stark Future are protected; holeshot/whoops/berm in the glossary. The translation keeps "Stark VARG". |
-| `02-tight-boxes-en` → German | Short labels in fixed boxes (table cells, buttons, callouts) grow 30 to 300% in German. **Side by side**: nothing spills out of its box. **Blocks & issues**: blocks that were shrunk or shortened by the Refiner. |
+| `08-jargon-en` → Spanish or German | **Details → Jargon**: Stark, Stark VARG, Stark Future are protected; holeshot/whoops/berm in the glossary. The translation keeps "Stark VARG". |
+| `02-tight-boxes-en` → German | Short labels in fixed boxes (table cells, buttons, callouts) grow 30 to 300% in German. **Preview**: nothing spills out of its box. **Details → Refinement**: blocks that were shrunk or shortened by the Refiner. |
 | `02-tight-boxes-en` / `03-multi-style-en` → Arabic | Right-to-left, shaped Arabic text, right-aligned in the original boxes. |
 | `03-multi-style-en` → Chinese | CJK font embedded automatically; bold/italic inline words preserved. |
 | `05-source-ar` / `06-source-zh` → English | Non-Latin sources: Arabic text layers come out of PDFs scrambled (lam-alef ligatures, numbers out of place); the prompt tells the translator to translate meaning, not artifacts. Chinese expands a lot into English. |
 | `07-scanned-en` → Spanish | Page without a text layer: detected as a scan, OCR'd (Tesseract), text painted over with the sampled paper colour. |
 | `09-stark-varg-manual-20p` → any | First 20 pages of the real Stark VARG owner's manual: subset fonts, TOC with tab leaders, photos, warning panels. |
+| `09-stark-varg-manual-20p` → German, then **Review** | The heading font (a 40-glyph subset) has no Ä/Ö/Ü: they are **built from the font's own pieces** (A + two of its periods), 0 tokens. Into Spanish it has no acute or tilde to borrow, so Review proposes **similar fonts** (ranked by metrics, with previews: Michroma for StarkSans), rewriting with available characters, or keeping the fallback. Pick one, **Apply and redo**: v2 appears, the version switcher and **Stats** show it cost 0 tokens. |
+| `10-cv-like-en` → German | A CV whose words are stored without spaces, a two-column header, underlined links, separators and symbol-font arrows: the regression test for overlapping text. **Preview** → "Outline blocks with issues". |
+| `11-subset-heading-en` → German | Headings in a subset font without umlauts: no mixed-font "ANHÄNGE" any more. |
+| **Understand** vs **Publish** on the upload screen | Draft (cheaper: translator model reviews, no escalation, fonts may fall back) vs professional pass. Overlaps are blocked in both. |
+| **History** in the header | Every run with its scores, versions, tokens and cost; open, download, pin, delete. Survives restarts. |
 | Upload `samples/invalid/*.pdf` | `not-a-pdf.pdf`, `encrypted.pdf` are rejected with a clear message; `truncated.pdf` is repaired and translated with a warning that content may be missing. |
 | Reload the page during a job | The job resumes (URL keeps `#job=<id>`, events are replayed over SSE). |
 
 During a job: the step bar, a tile per page (coloured by its score when done) and **Agent activity**
-(stages, analyst findings, refine/escalation rounds, tool calls, guardrail trips, agent spans with
-timings). After it: **Download**, **Side by side**, **Decisions**, **Blocks & issues** (score, issues by
-origin `check`/`judge`, attempt history like `translate 75 → refine 100`), **Cost & trace**.
+(stages, analyst findings, layout collisions sent back, refine/escalation rounds, tool calls, guardrail
+trips, agent spans with timings).
+
+After it, the top bar has the headline score (with translation and layout sub-scores and the reasons when
+it fails), **Download** and the version switcher, then three tabs:
+
+- **Preview**: side by side, optionally outlining the blocks with issues (click one to open it).
+- **Details**: **Jargon** (language, tone, protected terms, glossary), **Refinement** (every block with its
+  two scores, issues by origin `check`/`judge`, attempt history like `translate 75 → refine 100`), **Stats**
+  (tokens and estimated cost by stage and per page, agents and models, work without tokens such as the
+  glyph builder and layout QA, timeline, all versions) and **Log** (the progress log, filterable).
+- **Review**: collisions, missing characters per font, low-quality blocks, heavy shrinking and terms, each
+  with options marked "uses tokens" / "no tokens", an estimate before running, and **Apply and redo**.
 
 ## Architecture
 
@@ -143,7 +165,18 @@ container, jobs and files expire after `JOB_TTL_HOURS`. The API key only lives i
 
 ## How quality is measured
 
-Three layers, cheapest first:
+Two scores, both 0-100, and the headline is the **lower** one:
+
+- **Translation quality**: deterministic text checks + the LLM judge, as below.
+- **Layout fidelity**: collisions (critical, and each one also costs 5 points at document level), text
+  read back from the output PDF overlapping other text, fonts mixed inside a block, blocks that had to fall
+  back to a generic font, heavy shrinking, images moved.
+- **Passed** requires both scores ≥ `QUALITY_THRESHOLD`, **zero overlaps** and no untranslated block.
+
+Layout is checked twice: on MuPDF's real line boxes for every block during the loop (so collisions are fixed
+by the Refiner), and on the written PDF itself, which is the ground truth.
+
+The text layers, cheapest first:
 
 1. **Deterministic** (free, instant, never hallucinates): fit/overflow, protected terms present, numbers
    preserved (locale separators tolerated), output in the target script, not identical to the source,
@@ -155,6 +188,25 @@ Three layers, cheapest first:
 
 The same evaluator runs **online** (every job, shown to the user) and **offline** (`evals/run.py` over the
 corpus, where you can afford a more expensive judge with `--judge-model`).
+
+## Missing characters in original fonts
+
+Embedded fonts are usually subsets: they list letters whose outlines were stripped, keep ligature rules
+pointing at empty glyphs, and miss the target language's accents. `app/formats/pdf/glyphs.py` rebuilds
+every embedded font with fontTools:
+
+1. exact coverage: only glyphs with real outlines count (the old "render and look for ink" test was fooled
+   by MuPDF's fallback, which is how "ANHÄNGE" ended up with a serif Ä);
+2. missing accented letters are **built from the font's own pieces** (base letter + mark; a dieresis can be
+   made from two of its periods). Pure code: **0 tokens**, a few milliseconds per font, reported in Stats;
+3. the rebuilt font has no ligature table, so `fi` can no longer map to an empty glyph.
+
+When a letter cannot be built, the block uses a generic font as a whole (never a mixed word) and Review
+offers: a **similar complete font** for the whole document (ranked by width, cap height, x-height and
+stroke density from the bundled OFL fonts in `app/fonts`, and from Google Fonts at runtime only when none
+of them is close enough), **rewriting** with the characters the font has (Refiner with the allowed
+character set), **transliterating** (only for German umlauts/ß: ñ → n would change meaning), or keeping
+the fallback.
 
 ## Pseudo mode
 
@@ -181,6 +233,8 @@ including layout stress tests in Arabic and Chinese, runs in CI and in developme
 | `07-scanned-en` | no text layer: OCR |
 | `08-jargon-en` | brand names vs dictionary words, motocross slang |
 | `09-stark-varg-manual-20p` | first 20 pages of the real Stark VARG owner's manual |
+| `10-cv-like-en` | CV layout: words without space characters, two-column header, underlines, separators, symbol-font arrows |
+| `11-subset-heading-en` | headings in a font subset without umlauts or accents |
 | `invalid/` | truncated, encrypted, not a PDF |
 
 Target languages were chosen to fail differently: German (expansion, umlauts), Arabic (RTL, shaping),
@@ -201,7 +255,8 @@ Eval runs write `evals/results/<timestamp>/summary.md` plus the translated PDFs 
 ## Deploy on Coolify
 
 The repo ships `docker-compose.coolify.yml` (no published ports, Coolify's proxy routes to port 8000,
-health check on `/api/health`, persistent `/data` volume).
+health check on `/api/health`, persistent `/data` volume). **Keep `/data` on a persistent volume**: it holds
+the SQLite database (history, versions) and the job files.
 
 1. Coolify → Project → **+ New** → Public repository (or GitHub App) → `https://github.com/jperelli/pdf-translator`, branch `main`.
 2. Build pack **Docker Compose**, Docker Compose Location `/docker-compose.coolify.yml`.
@@ -210,7 +265,8 @@ health check on `/api/health`, persistent `/data` volume).
 4. **Domains**: keep the generated one or set yours on service `app` (port 8000), then **Deploy**.
 
 Alternatively use the plain **Dockerfile** build pack: port 8000, health check path `/api/health`,
-`OPENAI_API_KEY` as a runtime variable, and a volume on `/data`.
+`OPENAI_API_KEY` as a runtime variable, and a persistent storage mounted on `/data` (this is how the demo
+instance is deployed).
 
 ## Configuration
 
@@ -223,8 +279,10 @@ See `.env.example`. The main knobs: models per agent, `REASONING_EFFORT`, `QUALI
 ```
 app/
   main.py               FastAPI: upload, jobs, SSE events, download, page previews, static UI
-  jobs.py               background jobs, event fan-out, TTL cleanup
-  pipeline.py           orchestration + evaluator-optimizer loop + report
+  jobs.py               background jobs and versions, event fan-out, TTL cleanup
+  store.py              SQLite persistence (jobs, versions, events, decisions)
+  pipeline.py           orchestration + evaluator-optimizer loop + layout rounds + redo + report
+  review.py             review items, decisions, transliteration, token estimate
   ai/agents.py          agent definitions, guardrail, check_fit tool, resilient runner
   ai/prompts.py         runtime prompts (also in PROMPTS.md)
   ai/schemas.py         structured outputs
@@ -232,8 +290,11 @@ app/
   ai/setup.py           API key + tracing wiring
   observability.py      TracingProcessor streaming spans to the job
   formats/base.py       FormatHandler / LoadedDocument protocols
-  formats/pdf/          extract.py (layout, OCR), render.py (fonts, fit ladder, redaction), __init__.py
-  quality/checks.py     deterministic checks and MQM-style scoring
+  formats/pdf/          extract.py (layout, OCR), render.py (fit ladder, space claims, probes, redaction),
+                        glyphs.py (font rebuilding, accent building), fontmatch.py (similar fonts)
+  fonts/                bundled OFL candidate fonts (scripts/fetch_fonts.py)
+  quality/checks.py     deterministic text checks and MQM-style scoring
+  quality/layout.py     collisions, font fallbacks, read-back of the written PDF
   static/               UI (no build step)
 evals/run.py            offline eval harness
 samples/                test corpus + generator
@@ -247,7 +308,9 @@ tests/                  pytest
   the visual is correct).
 - Inline styling inside a paragraph is limited to bold/italic; mixed colours or sizes inside one paragraph
   take the dominant style.
-- Original fonts are rarely reusable for accented targets because commercial PDFs embed subsets.
+- Accents are built only when the font has the base letter and a mark (or a period for a dieresis); CID
+  subsets without a Unicode map cannot be reused at all and fall back to the closest generic family.
+- Token usage of agent calls that fail and are retried is not counted in Stats (the provider still bills it).
 - Jobs live in one process (in-memory registry + files on `/data`); horizontal scaling needs a queue.
-- The interactive glossary approval (choose which jargon to translate before translating) is the next step;
-  today the decisions are shown after the fact.
+- Term decisions (keep jargon in the original language, translate a "protected" word) are taken in Review,
+  after the first pass, not before translating.

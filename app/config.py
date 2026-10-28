@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+PRICES: dict[str, tuple[float, float]] = {
+    "gpt-5.5": (5.00, 30.00),
+    "gpt-5.4": (2.50, 15.00),
+    "gpt-5.4-mini": (0.75, 4.50),
+    "gpt-5.4-nano": (0.20, 1.25),
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.6-terra": (2.00, 12.00),
+    "gpt-5.6-sol": (4.00, 20.00),
+    "gpt-5": (1.25, 10.00),
+    "gpt-5-mini": (0.25, 2.00),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+}
 
 
 class Settings(BaseSettings):
@@ -47,9 +63,23 @@ class Settings(BaseSettings):
     max_pages: int = 60
     ocr_language: str = "eng"
 
+    # USD per 1M tokens (input, output). OpenAI list prices, Oct 2026. Override with MODEL_PRICES='{"m": [in, out]}'.
+    model_prices: str = ""
+
     data_dir: Path = Path("data")
     job_ttl_hours: int = 24
     openai_tracing: bool = True
+
+    def price(self, model: str) -> tuple[float, float]:
+        table = {**PRICES, **{k: tuple(v) for k, v in (json.loads(self.model_prices) if self.model_prices else {}).items()}}
+        return table.get(model, (0.0, 0.0))
+
+    def for_purpose(self, purpose: str) -> "Settings":
+        """'understand' is a cheap draft; 'publish' is the professional pass. Overlaps are blocked in both."""
+        if purpose == "understand":
+            return self.model_copy(update={"min_font_scale": 0.6, "enable_escalation": False,
+                                           "judge_model": self.translator_model, "max_refine_iterations": 1})
+        return self.model_copy(update={"min_font_scale": max(self.min_font_scale, 0.8)})
 
     @property
     def backend(self) -> Literal["openai", "pseudo"]:

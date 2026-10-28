@@ -64,6 +64,22 @@
     ],
     "pages": 1
   },
+  "10-cv-like-en.pdf": {
+    "description": "CV layout: words stored without spaces, two-column header on a dark band, underlined links and titles, separators, structured summary, symbol-font arrows. Collision regression test.",
+    "targets": [
+      "es",
+      "de"
+    ],
+    "pages": 1
+  },
+  "11-subset-heading-en.pdf": {
+    "description": "Headings in a font subset without umlauts/accents: missing-glyph regression test.",
+    "targets": [
+      "de",
+      "es"
+    ],
+    "pages": 1
+  },
   "09-stark-varg-manual-20p.pdf": {
     "description": "First 20 pages of the real Stark VARG Owner's Manual (InDesign, subset fonts, photos, TOC with tab leaders, warnings). The final boss.",
     "targets": [

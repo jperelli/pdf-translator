@@ -11,26 +11,31 @@ Overflow ladder for each unit (stop at the first rung that fits):
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from html import escape
 
 import pymupdf
 
+from app.formats.pdf.extract import rules_on, split_line
+from app.formats.pdf.glyphs import RebuiltFont
 from app.languages import Language
 from app.models import Fit, TextUnit
 
+MUPDF = threading.RLock()  # MuPDF is not thread-safe; every document operation goes through this lock
 SCALES = (1.0, 0.94, 0.88, 0.82, 0.76, 0.7, 0.64, 0.58, 0.52)
-ALLOWED_TAGS = re.compile(r"</?(b|i)>")
+ALLOWED_TAGS = re.compile(r"</?(?:b|i|u)>|<br\s*/?>")
+PAIRED = re.compile(r"<(/?)(b|i|u)>")
 SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
 PAD = 1.5
-LIGATURE = re.compile(r"f[filt]")
 
 
 def sanitize_markup(text: str) -> str:
-    """Escape everything except balanced <b>/<i>; drop tags entirely if the model broke them."""
+    """Escape everything except balanced <b>/<i>/<u> and <br>; drop paired tags if the model broke them."""
+    text = re.sub(r"<br\s*/?>", "<br>", text)
     tags = ALLOWED_TAGS.findall(text)
-    opened = [t for t in re.findall(r"<(/?)(b|i)>", text)]
-    depth: dict[str, int] = {"b": 0, "i": 0}
+    opened = PAIRED.findall(text)
+    depth: dict[str, int] = {"b": 0, "i": 0, "u": 0}
     balanced = True
     for closing, tag in opened:
         depth[tag] += -1 if closing else 1
@@ -44,131 +49,121 @@ def sanitize_markup(text: str) -> str:
             return key
         text = ALLOWED_TAGS.sub(keep, text)
     else:
-        text = ALLOWED_TAGS.sub("", text)
+        text = PAIRED.sub("", text)
+        text = re.sub(r"<br>", "\x01", text)
     text = escape(text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"), quote=False)
     for key, tag in placeholder.items():
         text = text.replace(key, tag)
-    return text
+    return text.replace("\x01", "<br>")
 
 
 def plain_text(markup: str) -> str:
-    return ALLOWED_TAGS.sub("", markup).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    return re.sub(r"\s*<br\s*/?>\s*", " ", PAIRED.sub("", markup)).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 # --------------------------------------------------------------------------- fonts
 
 @dataclass
 class FontBook:
-    """Original embedded fonts, reused only when they really contain every glyph we need.
+    """Original embedded fonts, rebuilt (app/formats/pdf/glyphs.py) so they can be reused for translations.
 
-    Subset fonts lie: their cmap often lists accented letters whose outlines were stripped, so coverage
-    is checked by rendering each character and looking for ink.
+    Coverage is exact (only glyphs with a real outline count), missing accented letters are built from the
+    font's own pieces, and the rebuilt fonts have no ligature table. A font is only used for a block when it
+    covers every character of that block; otherwise the block falls back to the closest generic family and
+    the layout QA reports it.
     """
 
     doc: pymupdf.Document
-    fonts: dict[str, bytes] = field(default_factory=dict)  # clean name -> font file
-    _ink: dict[tuple[str, str], bool] = field(default_factory=dict)
+    fonts: dict[str, RebuiltFont] = field(default_factory=dict)  # clean name -> rebuilt font
     usable: dict[str, bool] = field(default_factory=dict)
     archive: pymupdf.Archive = field(default_factory=pymupdf.Archive)
+    _versions: dict[str, str] = field(default_factory=dict)  # font -> archive file of its latest build
+    substitutes: dict[str, str] = field(default_factory=dict)  # font -> similar font chosen in review
 
     def __post_init__(self) -> None:
+        seen: set[int] = set()
         for page in self.doc:
             for xref, ext, _type, basefont, *_ in page.get_fonts(full=True):
                 name = SUBSET_PREFIX.sub("", basefont)
-                if name in self.fonts or ext not in ("ttf", "otf", "cff"):
+                if xref in seen or ext not in ("ttf", "otf", "cff"):
                     continue
+                seen.add(xref)
                 try:
                     _n, _e, _t, buf = self.doc.extract_font(xref)
                 except Exception:
                     continue
-                if buf and self._has_ink(buf, "a"):
-                    self.fonts[name] = buf
-
-    @staticmethod
-    def _has_ink(buf: bytes, ch: str) -> bool:
-        if ch.isspace():
-            return True
-        tmp = pymupdf.open()
-        page = tmp.new_page(width=40, height=40)
-        try:
-            page.insert_font(fontname="F0", fontbuffer=buf)
-            page.insert_text((6, 30), ch, fontname="F0", fontsize=26)
-        except Exception:
-            return False
-        pix = page.get_pixmap(dpi=72, colorspace=pymupdf.csGRAY)
-        return any(b < 200 for b in pix.samples)
-
-    @staticmethod
-    def _story_ink(buf: bytes, text: str) -> int:
-        arch = pymupdf.Archive()
-        arch.add(buf, "f.font")
-        tmp = pymupdf.open()
-        page = tmp.new_page(width=120, height=40)
-        page.insert_htmlbox(page.rect, f"<div>{text}</div>", archive=arch,
-                            css="@font-face {font-family: f; src: url(f.font);} div {font-family: f; font-size: 26px}")
-        return sum(1 for b in page.get_pixmap(dpi=72, colorspace=pymupdf.csGRAY).samples if b < 200)
-
-    def ligatures_ok(self, font: str) -> bool:
-        """MuPDF always applies f-ligatures, and subsets often carry an empty ligature glyph."""
-        key = (font, "<lig>")
-        if key not in self._ink:
-            buf = self.fonts[font]
-            joined, apart = self._story_ink(buf, "fi fl ff"), self._story_ink(buf, "f i f l f f")
-            self._ink[key] = apart > 0 and joined >= 0.8 * apart
-        return self._ink[key]
-
-    def covers(self, font: str, text: str) -> bool:
-        buf = self.fonts.get(font)
-        if buf is None:
-            return False
-        if LIGATURE.search(text) and not self.ligatures_ok(font):
-            return False
-        for ch in set(text):
-            key = (font, ch)
-            if key not in self._ink:
-                self._ink[key] = self._has_ink(buf, ch)
-            if not self._ink[key]:
-                return False
-        return True
-
-    def decide(self, texts_by_font: dict[str, list[str]], min_ratio: float = 0.8) -> None:
-        """Keep an original font when it can render most of its translated blocks.
-
-        Decided once per font for the whole document, so pages look consistent; the few blocks that need a
-        missing glyph fall back to the closest generic family (see `use_original`).
-        """
-        for font, texts in texts_by_font.items():
-            covered = sum(self.covers(font, plain_text(t)) for t in texts) if font in self.fonts else 0
-            ok = bool(texts) and covered / len(texts) >= min_ratio
-            self.usable[font] = ok
-            if ok:
-                self.archive.add(self.fonts[font], f"{self.css_name(font)}.font")
+                rf = RebuiltFont.from_pdf_font(name, buf) if buf else None
+                if not rf or not rf.cmap:
+                    continue
+                if name in self.fonts:
+                    self.fonts[name].merge(rf)
+                else:
+                    self.fonts[name] = rf
 
     def decide_for_target(self, texts_by_font: dict[str, list[str]], target: Language) -> None:
-        """Decide before translating (fit measurements need it): a font is kept when it has ink for the
-        letters its source text uses plus the target language's extra letters, and working ligatures."""
+        """Before translating (fit measurements depend on it): build the target language's extra letters
+        and keep a font when its script matches the target."""
         for font, texts in texts_by_font.items():
-            if font not in self.fonts or (target.script != "latin" and target.code != "en"):
+            rf = self.fonts.get(font)
+            if rf is None or (target.script != "latin" and target.code != "en"):
                 self.usable[font] = False
                 continue
-            used = {c for t in texts for c in plain_text(t) if c.isalpha()}
-            probe = "".join(sorted(used | set(target.probe)))
-            ok = self.covers(font, probe) and self.ligatures_ok(font)
-            self.usable[font] = ok
-            if ok:
-                self.archive.add(self.fonts[font], f"{self.css_name(font)}.font")
+            used = {c for t in texts for c in plain_text(t) if not c.isspace()}
+            rf.ensure(rf.missing("".join(used) + target.probe))
+            # usable when most source blocks are covered; uncovered blocks fall back one by one (and are reported)
+            covered = sum(not rf.missing(plain_text(t)) for t in texts)
+            self.usable[font] = bool(texts) and covered >= 0.6 * len(texts)
+
+    def covers(self, font: str, text: str) -> bool:
+        rf = self.fonts.get(font)
+        return rf is not None and not rf.missing(plain_text(text))
 
     def use_original(self, font: str, text: str) -> bool:
-        return self.usable.get(font, False) and self.covers(font, plain_text(text))
+        rf = self.fonts.get(font)
+        if not self.usable.get(font) or rf is None:
+            return False
+        miss = rf.missing(plain_text(text))
+        if miss:
+            rf.ensure(miss)
+        return not rf.missing(plain_text(text))
+
+    def missing(self, font: str, text: str) -> set[str]:
+        rf = self.fonts.get(font)
+        return rf.missing(plain_text(text)) if rf else set()
+
+    def override(self, font: str, path) -> bool:
+        """Review decision: replace an original font by a similar complete font for the whole document."""
+        rf = RebuiltFont.from_pdf_font(font, path.read_bytes())
+        if rf is None:
+            return False
+        self.fonts[font] = rf
+        self.usable[font] = True
+        self.substitutes[font] = path.stem
+        self._versions.pop(font, None)
+        return True
 
     @staticmethod
     def css_name(font: str) -> str:
         return "orig-" + re.sub(r"[^A-Za-z0-9]", "", font)
 
+    def _file(self, font: str) -> str:
+        rf = self.fonts[font]
+        name = f"{self.css_name(font)}-{self.substitutes.get(font, 'orig')}-{len(rf.built)}.ttf"
+        if self._versions.get(font) != name:
+            self.archive.add(rf.ttf(), name)
+            self._versions[font] = name
+        return name
+
     def font_face_css(self) -> str:
-        return "".join(
-            f"@font-face {{font-family: {self.css_name(f)}; src: url({self.css_name(f)}.font);}}\n"
-            for f, ok in self.usable.items() if ok)
+        return "".join(f"@font-face {{font-family: {self.css_name(f)}; src: url({self._file(f)});}}\n"
+                       for f, ok in self.usable.items() if ok and f in self.fonts)
+
+    def stats(self) -> dict:
+        return {"fonts": {n: {"built": "".join(rf.built), "ms": round(rf.build_ms, 1), "glyphs": len(rf.cmap),
+                              "substitute": self.substitutes.get(n)}
+                          for n, rf in self.fonts.items()},
+                "glyphs_built": sum(len(rf.built) for rf in self.fonts.values()),
+                "ms": round(sum(rf.build_ms for rf in self.fonts.values()), 1), "tokens": 0}
 
 
 # --------------------------------------------------------------------------- html
@@ -195,8 +190,9 @@ class PageGeometry:
     """Where a unit may grow: free space not used by other text, images or its own container."""
 
     rect: pymupdf.Rect
-    obstacles: list[tuple[str, pymupdf.Rect]]
+    obstacles: list[tuple[str, pymupdf.Rect]]  # (unit id | "text" | "img" | "rule", rect)
     margin: pymupdf.Rect
+    claims: dict[str, pymupdf.Rect] = field(default_factory=dict)  # space each unit's current text really uses
 
     @classmethod
     def from_page(cls, page: pymupdf.Page, units: list[TextUnit]) -> "PageGeometry":
@@ -205,12 +201,17 @@ class PageGeometry:
         if not any(u.ocr for u in units):  # text we do not translate (numbers, codes) is an obstacle too
             for b in page.get_text("dict")["blocks"]:
                 for line in b.get("lines", []):
-                    r = pymupdf.Rect(line["bbox"])
-                    if line["spans"] and "".join(s["text"] for s in line["spans"]).strip() and \
-                            not any(r.intersects(m) for m in mine):
-                        obs.append(("text", r))
+                    for seg in split_line(line):  # per segment: a TOC page number shares the line with its entry
+                        r = pymupdf.Rect(seg.bbox)
+                        if seg.text and not any(r.intersects(m) for m in mine):
+                            obs.append(("text", r))
         if not any(u.ocr for u in units):  # on scans the whole page is one image
             obs += [("img", pymupdf.Rect(i["bbox"])) for i in page.get_image_info()]
+            # separators and frames' edges, except the underlines that move with their text
+            decor = [pymupdf.Rect(d) for u in units for d in u.decorations]
+            for r in rules_on(page):
+                if not any(abs(r.y0 - d.y0) < 1 and r.intersects(d + (-1, -1, 1, 1)) for d in decor):
+                    obs.append(("rule", r))
         content = pymupdf.Rect()
         for _, r in obs:
             content |= r
@@ -224,6 +225,7 @@ class PageGeometry:
         box = pymupdf.Rect(unit.bbox)
         limit = pymupdf.Rect(unit.container) + (PAD, PAD, -PAD, -PAD) if unit.container else self.margin
         others = [r for oid, r in self.obstacles if oid != unit.id and not r.intersects(box)]
+        others += [r for oid, r in self.claims.items() if oid != unit.id and not r.intersects(box)]
         # grow down until the next thing below that shares our columns
         y1 = limit.y1
         for r in others:
@@ -266,6 +268,63 @@ def layout_box(unit: TextUnit) -> pymupdf.Rect:
     return pymupdf.Rect(unit.bbox) + (0, -lead / 2, 1, lead / 2 + 0.5)
 
 
+def _max_scale(rect, html, css, archive, lo: float, hi: float) -> float:
+    """Largest scale in [lo, hi] that fits (what insert_htmlbox will pick), to 0.5% precision."""
+    for _ in range(7):
+        mid = (lo + hi) / 2
+        if fits(rect, html, css, archive, mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+@dataclass
+class Probe:
+    """What MuPDF actually produces for one unit: line boxes in page coordinates and the fonts used."""
+
+    lines: list[pymupdf.Rect]
+    fonts: list[tuple[str, str]]  # (font name, text) per span
+    scale: float
+
+    @property
+    def ink(self) -> pymupdf.Rect:
+        r = pymupdf.Rect()
+        for ln in self.lines:
+            r |= ln
+        return r
+
+
+_SCRATCH: dict[tuple[float, float], pymupdf.Document] = {}
+
+
+def probe(unit: TextUnit, text: str, fit: Fit, lang: Language, fonts: FontBook | None,
+          page_rect: pymupdf.Rect) -> Probe:
+    html, css = unit_html(unit, text, lang, fonts)
+    css = (fonts.font_face_css() if fonts else "") + css
+    rect = pymupdf.Rect(fit.rect) if fit.rect else layout_box(unit)
+    key = (round(page_rect.width), round(page_rect.height))
+    doc = _SCRATCH.setdefault(key, pymupdf.open())
+    page = doc.new_page(width=max(page_rect.width, rect.x1 + 10), height=max(page_rect.height, rect.y1 + 10))
+    try:
+        _, scale = page.insert_htmlbox(rect, html, css=css, archive=fonts.archive if fonts else None,
+                                       scale_low=_low(fit))
+        lines, spans = [], []
+        for b in page.get_text("dict")["blocks"]:
+            for ln in b.get("lines", []):
+                txt = "".join(sp["text"] for sp in ln["spans"])
+                if txt.strip():
+                    lines.append(pymupdf.Rect(ln["bbox"]))
+                    spans += [(sp["font"], sp["text"]) for sp in ln["spans"] if sp["text"].strip()]
+        return Probe(lines, spans, scale)
+    finally:
+        doc.delete_page(page.number)
+
+
+def _low(fit: Fit) -> float:
+    return fit.scale if fit.status == "shrunk" else (0 if fit.status == "overflow" else 1)
+
+
 def plan_fit(unit: TextUnit, text: str, lang: Language, geom: PageGeometry, fonts: FontBook | None,
              min_scale: float) -> Fit:
     html, css = unit_html(unit, text, lang, fonts)
@@ -277,11 +336,9 @@ def plan_fit(unit: TextUnit, text: str, lang: Language, geom: PageGeometry, font
     grown = geom.grown(unit) | box
     if fits(grown, html, css, archive, 1.0):
         return Fit(status="expanded", rect=tuple(grown))
-    for s in SCALES[1:]:
-        if s < min_scale - 1e-6:
-            break
-        if fits(grown, html, css, archive, s):
-            return Fit(status="shrunk", scale=s, rect=tuple(grown))
+    if fits(grown, html, css, archive, min_scale):
+        s = _max_scale(grown, html, css, archive, min_scale, 1.0)
+        return Fit(status="shrunk", scale=round(s, 3), rect=tuple(grown))
     for s in SCALES:
         if s < min_scale and fits(grown, html, css, archive, s):
             return Fit(status="overflow", scale=s, rect=tuple(grown))
@@ -317,6 +374,14 @@ def erase(page: pymupdf.Page, units: list[TextUnit]) -> None:
             page.add_redact_annot(rr + (0, inset, 0, -inset), fill=False)
     page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                           text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+    # underlines are vector lines tied to the old text: remove them, CSS draws them under the new text
+    decorations = [pymupdf.Rect(d) for u in units for d in u.decorations]
+    if decorations:
+        for d in decorations:
+            page.add_redact_annot(d + (-0.5, -0.8, 0.5, 0.8), fill=False)
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                              graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                              text=pymupdf.PDF_REDACT_TEXT_NONE)
 
 
 def write_unit(page: pymupdf.Page, unit: TextUnit, text: str, fit: Fit, lang: Language,
@@ -324,7 +389,7 @@ def write_unit(page: pymupdf.Page, unit: TextUnit, text: str, fit: Fit, lang: La
     html, css = unit_html(unit, text, lang, fonts)
     css = (fonts.font_face_css() if fonts else "") + css
     rect = pymupdf.Rect(fit.rect) if fit.rect else layout_box(unit)
-    low = fit.scale if fit.status in ("shrunk",) else (0 if fit.status == "overflow" else 1)
+    low = _low(fit)
     spare, scale = page.insert_htmlbox(rect, html, css=css, archive=fonts.archive if fonts else None,
                                        scale_low=low)
     if spare < 0:  # should not happen, but never lose text: force fit

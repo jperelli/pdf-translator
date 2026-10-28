@@ -28,10 +28,11 @@ class TextUnit(BaseModel):
     page: int
     bbox: Rect
     line_rects: list[Rect]
-    text: str  # may contain <b>/<i> inline markup
+    text: str  # may contain <b>/<i>/<u> inline markup and <br> line breaks
     style: Style
     role: Literal["heading", "body", "label", "caption"] = "body"
     container: Rect | None = None  # enclosing box (table cell, button, frame) we must stay inside
+    decorations: list[Rect] = Field(default_factory=list)  # underlines drawn as vector lines, moved with the text
     ocr: bool = False
 
     @property
@@ -63,7 +64,7 @@ class Fit(BaseModel):
 
 class Attempt(BaseModel):
     iteration: int
-    stage: Literal["translate", "refine", "escalate"]
+    stage: Literal["translate", "refine", "escalate", "redo", "edit", "previous"]
     text: str
     score: float
     fit: Fit
@@ -75,7 +76,10 @@ class BlockResult(BaseModel):
     page: int
     source: str
     translation: str
-    score: float
+    score: float  # the lower of translation and layout
+    translation_score: float = 100.0
+    layout_score: float = 100.0
+    font: str = ""
     fit: Fit
     issues: list[Issue] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
@@ -119,17 +123,47 @@ class Usage(BaseModel):
 
 class PageReport(BaseModel):
     page: int
+    width: float = 0
+    height: float = 0
     ocr: bool = False
     blocks: int = 0
     score: float = 100.0
+    translation_score: float = 100.0
+    layout_score: float = 100.0
     overflow: int = 0
+    collisions: int = 0
     images_moved: int = 0
 
 
+class CallRecord(BaseModel):
+    """One agent run: what it cost and what it was for (drives the Stats tab)."""
+
+    agent: str
+    model: str
+    stage: str  # analysis | translate | judge | refine | escalate | redo
+    page: int | None = None
+    round: int = 0
+    blocks: int = 0
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    seconds: float = 0.0
+    version: int = 1
+
+
 class QualityReport(BaseModel):
-    score: float
+    score: float  # headline: the lower of translation_score and layout_score
+    translation_score: float
+    layout_score: float
     threshold: float
     passed: bool
+    fail_reasons: list[str] = Field(default_factory=list)
+    collisions: int = 0
+    output_overlaps: int = 0  # overlapping text lines found by reading the final PDF back
+    missing_glyph_blocks: int = 0
+    font_substituted_blocks: int = 0
+    purpose: str = "publish"
     blocks_total: int
     blocks_below_threshold: int
     blocks_refined: int

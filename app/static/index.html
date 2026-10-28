@@ -11,16 +11,20 @@
 </head>
 <body>
 <header class="topbar">
-  <a class="brand" href="/"><img src="/logo.svg" alt="" width="28" height="28"><span class="wordmark">STARK</span><span class="product">Document Translator</span></a>
-  <span id="mode" class="mode"></span>
+  <a class="brand" href="#"><img src="/logo.svg" alt="" width="28" height="28"><span class="wordmark">STARK</span><span class="product">Document Translator</span></a>
+  <nav class="nav">
+    <a href="#" id="nav-new">Translate</a>
+    <a href="#history" id="nav-history">History</a>
+    <span id="mode" class="mode"></span>
+  </nav>
 </header>
 
 <main>
-  <!-- 1. upload -->
+  <!-- upload -->
   <section id="upload" class="panel">
     <h1>Translate a PDF, keep the layout.</h1>
-    <p class="lead">Upload a document, pick a language. Agents analyse the document, translate it page by page,
-      check every block against the original layout and a quality reviewer, and fix what fails.</p>
+    <p class="lead">Upload a document, pick a language. Agents analyse it, translate page by page, check every
+      block against the original layout and a quality reviewer, fix what fails and tell you what still needs a decision.</p>
     <form id="form">
       <label id="drop" class="drop" tabindex="0">
         <input id="file" type="file" accept="application/pdf,.pdf" hidden>
@@ -28,10 +32,14 @@
         <span id="drop-text"><b>Drop a PDF here</b> or click to choose a file</span>
         <span id="drop-hint" class="hint"></span>
       </label>
+      <div class="purpose" role="radiogroup" aria-label="Purpose">
+        <label class="purpose-card"><input type="radio" name="purpose" value="understand">
+          <b>Understand</b><span>Draft to read and understand. Cheaper: no escalation, the translator model also reviews, fonts may fall back.</span></label>
+        <label class="purpose-card"><input type="radio" name="purpose" value="publish" checked>
+          <b>Publish</b><span>Professional final pass. Stronger reviewer, escalation, minimal font shrinking, every fidelity problem listed for review.</span></label>
+      </div>
       <div class="row">
-        <label class="field">Translate to
-          <select id="target"></select>
-        </label>
+        <label class="field">Translate to <select id="target"></select></label>
         <button id="go" class="btn primary" type="submit" disabled>Translate</button>
       </div>
       <p id="form-error" class="error" hidden></p>
@@ -42,11 +50,11 @@
     </div>
   </section>
 
-  <!-- 2. progress -->
+  <!-- progress -->
   <section id="progress" class="panel" hidden>
     <div class="job-head">
       <div><h2 id="job-title"></h2><p id="job-sub" class="muted"></p></div>
-      <button id="new-1" class="btn ghost">New translation</button>
+      <button class="btn ghost new-btn">New translation</button>
     </div>
     <ol id="steps" class="steps">
       <li data-stage="validate">Validate</li><li data-stage="extract">Read layout</li>
@@ -63,40 +71,80 @@
     <div id="job-error" class="error-card" hidden></div>
   </section>
 
-  <!-- 3. result -->
+  <!-- result -->
   <section id="result" class="panel" hidden>
-    <div class="result-head">
-      <div class="score-wrap"><div id="score" class="score"></div><span class="muted">quality score</span></div>
+    <div class="result-top">
+      <div class="score-block">
+        <div id="score" class="score"></div>
+        <div>
+          <div class="score-label">quality <span class="muted">(lower of translation and layout)</span></div>
+          <div id="subscores" class="subscores"></div>
+          <div id="reasons" class="reasons"></div>
+        </div>
+      </div>
       <div class="result-actions">
-        <a id="download" class="btn primary" href="#">Download translated PDF</a>
-        <button id="new-2" class="btn ghost">New translation</button>
+        <a id="download" class="btn primary" href="#">Download PDF</a>
+        <button class="btn ghost new-btn">New translation</button>
       </div>
     </div>
-    <div id="stats" class="stats"></div>
-    <div id="warnings"></div>
+    <div class="result-meta"><span id="res-file"></span><span id="versions"></span></div>
 
-    <div class="tabs" role="tablist">
-      <button class="tab active" data-tab="compare">Side by side</button>
-      <button class="tab" data-tab="analysis">Decisions</button>
-      <button class="tab" data-tab="blocks">Blocks &amp; issues</button>
-      <button class="tab" data-tab="trace">Cost &amp; trace</button>
+    <div class="tabs" role="tablist" data-group="main">
+      <button class="tab active" data-tab="preview">Preview</button>
+      <button class="tab" data-tab="details">Details</button>
+      <button class="tab" data-tab="review">Review <span id="review-badge" class="badge" hidden></span></button>
     </div>
-    <div class="tab-body" data-body="compare">
-      <div class="pager"><button id="prev" class="btn ghost small">&larr;</button><span id="page-label"></span><button id="next" class="btn ghost small">&rarr;</button></div>
+
+    <div class="tab-body" data-group="main" data-body="preview">
+      <div class="pager">
+        <button id="prev" class="btn ghost small">&larr;</button><span id="page-label"></span><button id="next" class="btn ghost small">&rarr;</button>
+        <label class="check inline"><input id="outline" type="checkbox"> Outline blocks with issues</label>
+      </div>
       <div class="compare">
         <figure><figcaption>Original</figcaption><img id="img-orig" alt="Original page"></figure>
-        <figure><figcaption>Translated</figcaption><img id="img-tr" alt="Translated page"></figure>
+        <figure><figcaption>Translated</figcaption><div class="overlay-wrap"><img id="img-tr" alt="Translated page"><div id="overlay"></div></div></figure>
       </div>
     </div>
-    <div class="tab-body" data-body="analysis" hidden><div id="analysis"></div></div>
-    <div class="tab-body" data-body="blocks" hidden>
-      <label class="check"><input id="only-issues" type="checkbox" checked> Only blocks with issues or revisions</label>
-      <div id="blocks"></div>
+
+    <div class="tab-body" data-group="main" data-body="details" hidden>
+      <div class="subtabs" data-group="details">
+        <button class="subtab active" data-tab="jargon">Jargon</button>
+        <button class="subtab" data-tab="refinement">Refinement</button>
+        <button class="subtab" data-tab="stats">Stats</button>
+        <button class="subtab" data-tab="runlog">Log</button>
+      </div>
+      <div class="tab-body" data-group="details" data-body="jargon"><div id="analysis"></div></div>
+      <div class="tab-body" data-group="details" data-body="refinement" hidden>
+        <label class="check"><input id="only-issues" type="checkbox" checked> Only blocks with issues or revisions</label>
+        <div id="blocks"></div>
+      </div>
+      <div class="tab-body" data-group="details" data-body="stats" hidden><div id="stats"></div></div>
+      <div class="tab-body" data-group="details" data-body="runlog" hidden>
+        <div id="log-filters" class="chips"></div>
+        <ul id="runlog" class="log tall"></ul>
+      </div>
     </div>
-    <div class="tab-body" data-body="trace" hidden><div id="trace"></div></div>
+
+    <div class="tab-body" data-group="main" data-body="review" hidden>
+      <p class="muted">What did not work, and what you can do about it. Pick the alternatives you want and redo:
+        only the affected blocks are processed again; the rest is reused as is.</p>
+      <div id="review"></div>
+      <div class="redo-bar">
+        <span id="estimate" class="muted"></span>
+        <button id="redo" class="btn primary">Apply and redo</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- history -->
+  <section id="history" class="panel" hidden>
+    <div class="job-head"><h2>Previous runs</h2><button class="btn ghost new-btn">New translation</button></div>
+    <div class="table-wrap"><table id="history-table"></table></div>
+    <div class="pager"><button id="h-prev" class="btn ghost small">&larr;</button><span id="h-label"></span><button id="h-next" class="btn ghost small">&rarr;</button></div>
   </section>
 </main>
 <footer class="foot">Built for Stark Future · OpenAI Agents SDK · PyMuPDF</footer>
+<script src="/charts.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

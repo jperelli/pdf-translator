@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -163,7 +164,8 @@ class AgentRunError(RuntimeError):
 
 async def run_agent(agent: Agent, payload: Any, ctx: TranslationContext, usage: dict[str, Usage],
                     *, images: list[str] | None = None, max_turns: int = 4, attempts: int = 2,
-                    timeout: float = 180.0, group_id: str | None = None):
+                    timeout: float = 180.0, group_id: str | None = None,
+                    on_usage: Callable[[Usage, float, bool], None] | None = None):
     """Run an agent with structured output, app-level retries and usage accounting.
 
     Transport errors (429, 5xx, timeouts) are retried by the SDK itself (ModelRetrySettings). Here we retry
@@ -176,6 +178,7 @@ async def run_agent(agent: Agent, payload: Any, ctx: TranslationContext, usage: 
         content: list[dict[str, Any]] = [{"type": "input_text", "text": text + note}]
         for img in images or []:
             content.append({"type": "input_image", "image_url": img, "detail": "high"})
+        t0 = time.perf_counter()
         try:
             result = await asyncio.wait_for(
                 Runner.run(agent, [{"role": "user", "content": content}], context=ctx, max_turns=max_turns,
@@ -183,7 +186,10 @@ async def run_agent(agent: Agent, payload: Any, ctx: TranslationContext, usage: 
                 timeout=timeout)
             u = result.context_wrapper.usage
             bucket = usage.setdefault(agent.name, Usage())
-            bucket.add(Usage(requests=u.requests, input_tokens=u.input_tokens, output_tokens=u.output_tokens))
+            spent = Usage(requests=u.requests, input_tokens=u.input_tokens, output_tokens=u.output_tokens)
+            bucket.add(spent)
+            if on_usage:
+                on_usage(spent, time.perf_counter() - t0, True)
             return result.final_output
         except OutputGuardrailTripwireTriggered as exc:
             info = exc.guardrail_result.output.output_info
