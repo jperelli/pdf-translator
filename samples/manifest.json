@@ -1,0 +1,78 @@
+{
+  "01-simple-en.pdf": {
+    "description": "Happy path: headings, paragraphs, bullets, one image.",
+    "targets": [
+      "es",
+      "de"
+    ],
+    "pages": 1
+  },
+  "02-tight-boxes-en.pdf": {
+    "description": "Short labels in fixed boxes, table cells, buttons, callouts. Overflow torture test (EN->DE expands 30-300%).",
+    "targets": [
+      "de",
+      "ar",
+      "zh"
+    ],
+    "pages": 2
+  },
+  "03-multi-style-en.pdf": {
+    "description": "Two columns, serif/sans/mono, bold/italic inline, colored warning box, caption.",
+    "targets": [
+      "de",
+      "ar",
+      "zh"
+    ],
+    "pages": 2
+  },
+  "04-source-de.pdf": {
+    "description": "German source: umlauts, eszett, long compounds.",
+    "targets": [
+      "en",
+      "es"
+    ],
+    "pages": 1
+  },
+  "05-source-ar.pdf": {
+    "description": "Arabic source: RTL extraction and shaping.",
+    "targets": [
+      "en",
+      "es"
+    ],
+    "pages": 1
+  },
+  "06-source-zh.pdf": {
+    "description": "Chinese source: logographic text expands a lot into Latin scripts.",
+    "targets": [
+      "en",
+      "de"
+    ],
+    "pages": 1
+  },
+  "07-scanned-en.pdf": {
+    "description": "Scanned page with no text layer: OCR path.",
+    "targets": [
+      "es"
+    ],
+    "pages": 1
+  },
+  "08-jargon-en.pdf": {
+    "description": "Brand names (Stark, VARG) and MX slang (holeshot, whoops, berm, brap).",
+    "targets": [
+      "es",
+      "de"
+    ],
+    "pages": 1
+  },
+  "09-stark-varg-manual-20p.pdf": {
+    "description": "First 20 pages of the real Stark VARG Owner's Manual (InDesign, subset fonts, photos, TOC with tab leaders, warnings). The final boss.",
+    "targets": [
+      "es",
+      "de",
+      "ar",
+      "zh"
+    ],
+    "pages": 20,
+    "source": "https://australianelectricmotorco.com/wp-content/uploads/2023/06/VARG-Owners-Manual-1.pdf"
+  }
+}
