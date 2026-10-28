@@ -123,7 +123,11 @@ class JobStore:
                 yield None
 
     async def cleanup_loop(self) -> None:
+        from app.intake import Uploads
+
+        uploads = Uploads(self.s)
         while True:
             for job_id in self.db.expired(time.time() - self.s.job_ttl_hours * 3600):
                 self.delete(job_id)
+            uploads.cleanup()  # agent uploads never turned into a job
             await asyncio.sleep(600)

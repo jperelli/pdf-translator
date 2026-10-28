@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     # Admin area (/admin, history, delete) and Prometheus /metrics. Empty = disabled.
     admin_token: str = ""
     metrics_token: str = ""  # bearer token for /metrics; defaults to admin_token
+    # MCP server at /mcp and agent uploads at /api/uploads (bearer token). Empty = disabled.
+    mcp_token: str = ""
+    public_url: str = ""  # e.g. https://pdf-translator.example.com, for absolute links in MCP results
 
     # Job queue (Huey on SQLite). Immediate mode runs a task inside the caller: tests and single-process dev.
     queue_immediate: bool = False

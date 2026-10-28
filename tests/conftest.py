@@ -7,6 +7,7 @@ from pathlib import Path
 os.environ["LLM_BACKEND"] = "pseudo"
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["FONT_DOWNLOADS"] = "0"  # no network: same-family fonts come from app/fonts only
+os.environ["MCP_TOKEN"] = "test-mcp-token"
 os.environ["ADMIN_TOKEN"] = "test-admin-token"
 os.environ["QUEUE_IMMEDIATE"] = "1"  # Huey runs each task inside the request: no consumer needed
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="pdf-translator-tests-")

@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 from pathlib import Path
 
 import pymupdf
@@ -18,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.ai.setup import configure_sdk
 from app.config import PURPOSES, get_settings
-from app.formats import InvalidDocument, detect
+from app.formats import InvalidDocument
+from app.intake import Uploads, safe_name, validate_pdf
 from app.jobs import JobStore
 from app.languages import LANGUAGES
 from app.models import BlockResult
@@ -33,10 +35,23 @@ JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from app import mcp_server
+
     configure_sdk(settings)
     app.state.jobs = JobStore(settings)
+    app.state.uploads = Uploads(settings)
+    mcp_server.bind(app.state.jobs, app.state.uploads, settings)
+    # stateless Streamable HTTP (protocol 2026-07-28 has no sessions). Host checks are off because the
+    # app sits behind a proxy on a public name; /mcp checks the bearer token and the Origin itself.
+    app.state.mcp_http = mcp_server.server.streamable_http_app(
+        streamable_http_path="/mcp", stateless_http=True,
+        max_request_body_size=int(settings.max_upload_mb * 1024 * 1024 * 1.4) + 65536,  # pdf_base64
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
     task = asyncio.create_task(app.state.jobs.cleanup_loop())
-    yield
+    async with mcp_server.server.session_manager.run():
+        yield
     task.cancel()
 
 
@@ -84,9 +99,49 @@ def require_admin(request: Request) -> None:
         raise HTTPException(401, "Log in as administrator to see this.")
 
 
-def _safe_name(name: str | None) -> str:
-    stem = Path(name or "document.pdf").name
-    return re.sub(r"[^\w.\- ]", "_", stem)[:120] or "document.pdf"
+# ------------------------------------------------------------------ MCP and agent uploads
+
+def _mcp_auth_error(headers: dict[str, str]) -> tuple[int, str] | None:
+    """Bearer MCP_TOKEN, and (Streamable HTTP spec) an Origin, when present, must be this host."""
+    if not settings.mcp_token:
+        return 404, "The MCP server is disabled: set MCP_TOKEN to enable it."
+    got = headers.get("authorization", "")
+    if not (got.startswith("Bearer ") and hmac.compare_digest(got[7:].strip().encode(), settings.mcp_token.encode())):
+        return 401, "Bearer token required (MCP_TOKEN)."
+    origin = headers.get("origin")
+    if origin and urlparse(origin).netloc not in {headers.get("host"), headers.get("x-forwarded-host"),
+                                                   urlparse(settings.public_url).netloc}:
+        return 403, "Origin not allowed."
+    return None
+
+
+class MCPEndpoint:
+    """/mcp: checks the token, then hands the request to the MCP SDK's Streamable HTTP app."""
+
+    async def __call__(self, scope, receive, send):
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        err = _mcp_auth_error(headers)
+        if err:
+            extra = {"WWW-Authenticate": 'Bearer realm="pdf-translator"'} if err[0] == 401 else {}
+            await JSONResponse({"error": err[1]}, status_code=err[0], headers=extra)(scope, receive, send)
+            return
+        await scope["app"].state.mcp_http(scope, receive, send)
+
+
+app.add_route("/mcp", MCPEndpoint(), include_in_schema=False)
+
+
+@app.post("/api/uploads", status_code=201)
+async def upload(request: Request, file: UploadFile = File(...)):
+    """For agents: upload a PDF, then call the MCP tool translate_pdf(upload_id=...). Same token as /mcp."""
+    err = _mcp_auth_error({k.lower(): v for k, v in request.headers.items()})
+    if err:
+        raise HTTPException(err[0], err[1])
+    data = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    try:
+        return request.app.state.uploads.save(safe_name(file.filename), data)
+    except InvalidDocument as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/health")
@@ -135,21 +190,13 @@ async def create_job(request: Request, target: str = Form(...), file: UploadFile
             raise HTTPException(413, f"File too large: the limit is {settings.max_upload_mb} MB.")
         if not data:
             raise HTTPException(422, "The file is empty.")
-        name = _safe_name(file.filename)
+        name = safe_name(file.filename)
     else:
         raise HTTPException(422, "Upload a file or pick a sample.")
-    try:
-        detect(name, data[:2048])
-        # fail fast on corrupted / encrypted files instead of after queueing
-        with pymupdf.open(stream=data, filetype="pdf") as doc:
-            if doc.needs_pass:
-                raise InvalidDocument("The PDF is password protected. Remove the password and upload it again.")
-            if doc.page_count > settings.max_pages:
-                raise InvalidDocument(f"The PDF has {doc.page_count} pages; the limit is {settings.max_pages}.")
+    try:  # fail fast on corrupted / encrypted files instead of after queueing
+        validate_pdf(name, data, settings)
     except InvalidDocument as exc:
         raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(422, "The file is not a readable PDF (it may be corrupted or truncated).") from exc
     job = await request.app.state.jobs.create(name, target, data, purpose)
     return job.summary()
 

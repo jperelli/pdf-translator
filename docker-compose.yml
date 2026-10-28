@@ -19,6 +19,8 @@ services:
       WORKERS: ${WORKERS:-2}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
     volumes:
       - translator-data:/data
     restart: unless-stopped

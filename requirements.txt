@@ -9,3 +9,5 @@ openai==3.35.1
 pymupdf==2.0
 fonttools==4.67.0
 huey==3.4.0
+mcp==2.3.0
+sse-starlette==3.5.0  # transitive (mcp); 3.6.0 was days old

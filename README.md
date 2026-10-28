@@ -166,6 +166,40 @@ flowchart LR
   (1.1 GB peak for that job, freed afterwards). Workers also run with `MALLOC_ARENA_MAX=2` and are recycled
   after `WORKER_MAX_TASKS` jobs (default 10). The admin page and the dashboard show memory per process.
 
+### MCP server (for agents)
+
+Agents can use the service through MCP at `/mcp`: Streamable HTTP, protocol 2026-07-28, stateless,
+official Python SDK (`mcp` 2.3.0). Requests need `Authorization: Bearer $MCP_TOKEN`; an `Origin` header,
+when present, must be this host. Without `MCP_TOKEN` the endpoint is off.
+
+```json
+{"mcpServers": {"pdf-translator": {"type": "http", "url": "https://pdf-translator.coffee.jperelli.com/mcp",
+                                   "headers": {"Authorization": "Bearer <MCP_TOKEN>"}}}}
+```
+
+| Tool | What it does |
+|---|---|
+| `translate_pdf` | Starts a job and returns its `job_id` right away. Exactly one of: `pdf_url` (public URL), `upload_id`, `pdf_base64` (small files only: it travels inside the call) or `sample`. Takes `target_language` and `mode` (`fast` / `quality`). |
+| `wait_for_translation` | Answers as an SSE stream of `notifications/progress` (step, page, percent) and returns the result when the job ends, or its status after `max_seconds` (default 240). Call it again to keep waiting. |
+| `get_translation` | Score, translation and layout scores, major/critical issues to review, cost, links to the PDF and to the review page (also as `resource_link` content). |
+| `cancel_translation`, `list_languages`, `list_samples` | |
+
+**Why a job pattern instead of one long call.** Translations take seconds to minutes. Some clients cut tool
+calls after a fixed time, and streams drop. The job keeps running in the queue whatever happens to the
+connection, and any later call with the `job_id` picks it up. MCP's optional Tasks extension solves the same
+problem, but client support is not there yet.
+
+**Large files.** Upload them first, then translate with the returned id (kept for an hour, consumed by the
+job it creates):
+
+```
+curl -H "Authorization: Bearer $MCP_TOKEN" -F file=@manual.pdf https://.../api/uploads
+```
+
+**`pdf_url` and SSRF.** The URL is fetched only if every address its host resolves to is public (no
+loopback, private, link-local/cloud metadata, multicast or reserved ranges). Each redirect is re-checked,
+the size is capped while streaming, and the body must start with `%PDF`.
+
 ### Speed and cost
 
 Measured with the real models in Quality mode on samples 10 (CV-like → German), 08 (jargon → Spanish) and
@@ -391,7 +425,8 @@ See `.env.example`. The main knobs: models per agent, `REASONING_EFFORT`, `QUALI
 `MAX_UPLOAD_MB`, `MAX_PAGES`, `OCR_LANGUAGE`, `OPENAI_TRACING`. Queue: `WORKERS` (translations at the same
 time), `WORKER_MAX_TASKS` (recycle a worker process after N jobs), `QUEUE_IMMEDIATE`, `STALE_AFTER_S`,
 `MAX_ATTEMPTS`. Admin and monitoring: `ADMIN_TOKEN` (enables `/admin` and the history), `METRICS_TOKEN`
-(bearer token for `/metrics`, defaults to `ADMIN_TOKEN`).
+(bearer token for `/metrics`, defaults to `ADMIN_TOKEN`). Agents: `MCP_TOKEN` (enables `/mcp` and
+`/api/uploads`), `PUBLIC_URL` (base of the links in MCP results; by default taken from the request).
 
 ## Project layout
 
@@ -402,6 +437,8 @@ app/
   worker.py             Huey tasks: run a job, lost-worker recovery
   store.py              SQLite persistence (jobs, versions, events, decisions, counters)
   metrics.py            Prometheus /metrics computed from SQLite and the queue
+  mcp_server.py         MCP tools for agents (mounted at /mcp)
+  intake.py             PDF validation, agent uploads, URL fetching with SSRF guards
   pipeline.py           orchestration + evaluator-optimizer loop + layout rounds + redo + report
   review.py             review items, decisions, transliteration, token estimate
   ai/agents.py          agent definitions, guardrail, check_fit tool, resilient runner
@@ -439,3 +476,7 @@ tests/                  pytest
 - A retried job starts over from page 1 and pays its tokens again (no per-page checkpoints yet).
 - Term decisions (keep jargon in the original language, translate a "protected" word) are taken in Review,
   after the first pass, not before translating.
+- `pdf_url` checks the addresses a host resolves to and then connects. A DNS answer that changes between the
+  two (DNS rebinding) is not pinned.
+- MCP results link to the PDF instead of embedding it. The link is a capability URL: anyone holding the job
+  id can download until the job expires.
