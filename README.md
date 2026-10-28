@@ -140,6 +140,32 @@ flowchart LR
 - `scripts/start.sh` runs `huey_consumer` (`WORKERS` processes, default 2) and uvicorn in one container. If either
   exits, the container exits and Docker's restart policy brings both back; interrupted jobs are then retried.
 
+### Monitoring: admin page and Grafana
+
+- **`/admin`** (log in with `ADMIN_TOKEN`; the History tab and deleting/pinning runs need it too). It shows:
+  - the queue and the running jobs: progress, worker process, last event;
+  - recent failures;
+  - every Huey process with its memory.
+
+  Actions:
+  - cancel a queued or running job (a running worker notices at its next event and stops spending tokens);
+  - retry a failed job as a new attempt.
+
+  Job links stay capability URLs (random ids), so translating needs no login.
+- **`/metrics`** in Prometheus format, behind a bearer token (`METRICS_TOKEN`, defaults to `ADMIN_TOKEN`).
+  - Gauges are read from SQLite and the Huey queue at scrape time: queue length, running/queued jobs, oldest
+    job, worker check-in, memory per Huey process. No in-memory registry, so the separate worker processes
+    need nothing special.
+  - Counters and histograms are stored in a `counters` table, so they survive restarts and the TTL cleanup of
+    old jobs (`rate()`/`increase()` stay correct). They cover jobs finished/retried/canceled, job duration and
+    queue wait, and tokens, requests and cost by model and stage.
+- **Grafana:** `deploy/grafana/pdf-translator-dashboard.json` (import it, pick the Prometheus datasource).
+  The scrape job is in `deploy/prometheus/scrape-pdf-translator.yml`.
+- **Memory.** A long-lived scratch document used for layout probes kept every embedded font: with Chinese
+  text a worker reached 2.7 GB on one 20-page manual and kept growing. Probes now use a fresh document
+  (1.1 GB peak for that job, freed afterwards). Workers also run with `MALLOC_ARENA_MAX=2` and are recycled
+  after `WORKER_MAX_TASKS` jobs (default 10). The admin page and the dashboard show memory per process.
+
 ### Agents SDK features used
 
 - **Structured outputs** (`output_type`, Pydantic, strict JSON schema) for every agent.
@@ -325,7 +351,8 @@ See `.env.example`. The main knobs: models per agent, `REASONING_EFFORT`, `QUALI
 `MAX_REFINE_ITERATIONS`, `ENABLE_JUDGE`, `ENABLE_ESCALATION`, `MAX_CONCURRENT_PAGES`, `MIN_FONT_SCALE`,
 `MAX_UPLOAD_MB`, `MAX_PAGES`, `OCR_LANGUAGE`, `OPENAI_TRACING`. Queue: `WORKERS` (translations at the same
 time), `WORKER_MAX_TASKS` (recycle a worker process after N jobs), `QUEUE_IMMEDIATE`, `STALE_AFTER_S`,
-`MAX_ATTEMPTS`.
+`MAX_ATTEMPTS`. Admin and monitoring: `ADMIN_TOKEN` (enables `/admin` and the history), `METRICS_TOKEN`
+(bearer token for `/metrics`, defaults to `ADMIN_TOKEN`).
 
 ## Project layout
 
@@ -334,7 +361,8 @@ app/
   main.py               FastAPI: upload, jobs, SSE events, download, page previews, static UI
   jobs.py               web side of the jobs: enqueue, read status/results, stream events, TTL cleanup
   worker.py             Huey tasks: run a job, lost-worker recovery
-  store.py              SQLite persistence (jobs, versions, events, decisions)
+  store.py              SQLite persistence (jobs, versions, events, decisions, counters)
+  metrics.py            Prometheus /metrics computed from SQLite and the queue
   pipeline.py           orchestration + evaluator-optimizer loop + layout rounds + redo + report
   review.py             review items, decisions, transliteration, token estimate
   ai/agents.py          agent definitions, guardrail, check_fit tool, resilient runner
@@ -351,6 +379,7 @@ app/
   quality/layout.py     collisions, font fallbacks, read-back of the written PDF
   static/               UI (no build step); Chart.js 4.5.1 vendored in static/vendor (MIT, CSP allows only 'self')
 scripts/start.sh        container entry point: queue workers + web
+deploy/                 Grafana dashboard and Prometheus scrape job
 evals/run.py            offline eval harness
 samples/                test corpus + generator
 tests/                  pytest

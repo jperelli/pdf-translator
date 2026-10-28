@@ -17,6 +17,8 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
       MAX_PAGES: ${MAX_PAGES:-60}
       WORKERS: ${WORKERS:-2}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       OPENAI_TRACING: ${OPENAI_TRACING:-true}
     volumes:
       - translator-data:/data

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pymupdf
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 
 from app.ai.setup import configure_sdk
@@ -56,6 +60,28 @@ def _job(request: Request, job_id: str):
     if not job:
         raise HTTPException(404, "Job not found (jobs expire after a while).")
     return job
+
+
+# ------------------------------------------------------------------ admin session
+
+ADMIN_COOKIE = "translator_admin"
+
+
+def _session_value() -> str:
+    """Cookie value derived from ADMIN_TOKEN: changing the token logs everybody out."""
+    return hmac.new(settings.admin_token.encode(), b"admin-session-v1", hashlib.sha256).hexdigest()
+
+
+def is_admin(request: Request) -> bool:
+    cookie = request.cookies.get(ADMIN_COOKIE, "")
+    return bool(settings.admin_token) and hmac.compare_digest(cookie, _session_value())
+
+
+def require_admin(request: Request) -> None:
+    if not settings.admin_token:
+        raise HTTPException(403, "The admin area is disabled: set ADMIN_TOKEN to enable it.")
+    if not is_admin(request):
+        raise HTTPException(401, "Log in as administrator to see this.")
 
 
 def _safe_name(name: str | None) -> str:
@@ -128,7 +154,128 @@ async def create_job(request: Request, target: str = Form(...), file: UploadFile
     return job.summary()
 
 
-@app.get("/api/jobs")
+@app.get("/api/admin/session")
+def admin_session(request: Request):
+    return {"enabled": bool(settings.admin_token), "admin": is_admin(request)}
+
+
+@app.post("/api/admin/login")
+async def admin_login(request: Request):
+    body = await request.json()
+    token = str((body or {}).get("token", ""))
+    if not settings.admin_token:
+        raise HTTPException(403, "The admin area is disabled: set ADMIN_TOKEN to enable it.")
+    if not hmac.compare_digest(token.encode(), settings.admin_token.encode()):
+        await asyncio.sleep(1)  # slow down guessing
+        raise HTTPException(401, "Wrong admin token.")
+    resp = JSONResponse({"admin": True})
+    resp.set_cookie(ADMIN_COOKIE, _session_value(), max_age=7 * 86400, httponly=True, samesite="strict",
+                    secure=request.url.scheme == "https", path="/")
+    return resp
+
+
+@app.post("/api/admin/logout")
+def admin_logout():
+    resp = JSONResponse({"admin": False})
+    resp.delete_cookie(ADMIN_COOKIE, path="/")
+    return resp
+
+
+def _admin_job(j: dict, db) -> dict:
+    from app.worker import worker_alive
+
+    now = time.time()
+    last = db.last_event(j["id"], j["version"], j["attempt"]) if j["status"] in ("queued", "running") else None
+    return {"id": j["id"], "filename": j["filename"], "target": j["target"], "purpose": j["purpose"],
+            "status": j["status"], "version": j["version"], "attempt": j["attempt"], "error": j["error"],
+            "created": j["created"], "updated": j["updated"],
+            "waiting_s": round(now - (j["queued_at"] or j["created"]), 1) if j["status"] == "queued" else None,
+            "running_s": round(now - (j["started"] or j["updated"]), 1) if j["status"] == "running" else None,
+            "worker": j["worker"], "worker_alive": worker_alive(j["worker"]) if j["status"] == "running" else None,
+            "heartbeat_age_s": round(now - j["heartbeat"], 1) if j["heartbeat"] and j["status"] == "running" else None,
+            "percent": db.last_percent(j["id"], j["version"], j["attempt"]) if last else None,
+            "last_event": last}
+
+
+def _processes(db) -> list[dict]:
+    from app.worker import worker_processes
+
+    by_pid = {j["worker"].split(":")[1]: j for j in db.by_status("running") if j["worker"] and ":" in j["worker"]}
+    return [{**p, "job": by_pid.get(str(p["pid"]), {}).get("id"), "filename": by_pid.get(str(p["pid"]), {}).get("filename")}
+            for p in worker_processes()]
+
+
+@app.get("/api/admin/overview", dependencies=[Depends(require_admin)])
+def admin_overview(request: Request):
+    from app.worker import huey
+
+    db = request.app.state.jobs.db
+    seen = db.meta("worker_seen")
+    try:
+        queue = {"pending": huey.pending_count(), "scheduled": huey.scheduled_count()}
+    except Exception as exc:
+        queue = {"pending": None, "scheduled": None, "error": str(exc)}
+    totals = {(n, tuple(sorted(lab.items()))): v for n, lab, v in db.counters()}
+
+    def total(name: str, **labels) -> float:
+        return sum(v for (n, lab), v in totals.items() if n == name and all(dict(lab).get(k) == x
+                                                                          for k, x in labels.items()))
+    return {
+        "now": time.time(),
+        "queue": queue,
+        "worker_last_seen_s": round(time.time() - seen, 1) if seen else None,
+        "counts": db.status_counts(),
+        "processes": _processes(db),
+        "running": [_admin_job(j, db) for j in db.by_status("running")],
+        "queued": [_admin_job(j, db) for j in db.by_status("queued")],
+        "failed": [_admin_job(j, db) for j in db.by_status("error", 20)],
+        "totals": {"finished_done": total("jobs_finished_total", status="done"),
+                   "finished_error": total("jobs_finished_total", status="error"),
+                   "retried": total("jobs_retried_total"), "canceled": total("jobs_canceled_total"),
+                   "pages": total("pages_translated_total"), "cost_usd": round(total("llm_cost_usd_total"), 4),
+                   "tokens": total("llm_input_tokens_total") + total("llm_output_tokens_total")},
+    }
+
+
+@app.post("/api/admin/jobs/{job_id}/retry", dependencies=[Depends(require_admin)])
+async def admin_retry(request: Request, job_id: str):
+    from app.worker import translate_job
+
+    _job(request, job_id)
+    try:
+        version, attempt = request.app.state.jobs.db.retry(job_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await run_in_threadpool(translate_job, job_id, version, attempt)
+    return request.app.state.jobs.get(job_id).summary()
+
+
+@app.post("/api/admin/jobs/{job_id}/cancel", dependencies=[Depends(require_admin)])
+def admin_cancel(request: Request, job_id: str):
+    _job(request, job_id)
+    try:
+        request.app.state.jobs.db.cancel(job_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return request.app.state.jobs.get(job_id).summary()
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(request: Request):
+    from app.metrics import render
+    from app.worker import huey
+
+    token = settings.metrics_token or settings.admin_token
+    if not token:
+        raise HTTPException(403, "Metrics are disabled: set METRICS_TOKEN (or ADMIN_TOKEN).")
+    got = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(got.encode(), token.encode()):
+        raise HTTPException(401, "Bearer token required.")
+    return PlainTextResponse(render(request.app.state.jobs.db, huey),
+                             media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.get("/api/jobs", dependencies=[Depends(require_admin)])
 def list_jobs(request: Request, limit: int = 50, offset: int = 0):
     rows, total = request.app.state.jobs.db.list_jobs(max(1, min(limit, 200)), max(0, offset))
     return {"jobs": rows, "total": total}
@@ -147,7 +294,7 @@ def get_job(request: Request, job_id: str, version: int | None = None):
             "events": v["events"], "shown_version": version}
 
 
-@app.delete("/api/jobs/{job_id}")
+@app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_admin)])
 def delete_job(request: Request, job_id: str):
     job = _job(request, job_id)
     if job.status in ("queued", "running"):
@@ -156,7 +303,7 @@ def delete_job(request: Request, job_id: str):
     return {"deleted": job_id}
 
 
-@app.post("/api/jobs/{job_id}/pin")
+@app.post("/api/jobs/{job_id}/pin", dependencies=[Depends(require_admin)])
 def pin_job(request: Request, job_id: str, pinned: bool = True):
     _job(request, job_id)
     request.app.state.jobs.db.pin(job_id, pinned)

@@ -15,6 +15,8 @@
   <nav class="nav">
     <a href="#" id="nav-new">Translate</a>
     <a href="#history" id="nav-history">History</a>
+    <a href="#admin" id="nav-admin">Admin</a>
+    <a href="#" id="nav-logout" hidden>Log out</a>
   </nav>
 </header>
 
@@ -136,7 +138,40 @@
     <div class="table-wrap"><table id="history-table"></table></div>
     <div class="pager"><button id="h-prev" class="btn ghost small">&larr;</button><span id="h-label"></span><button id="h-next" class="btn ghost small">&rarr;</button></div>
   </section>
+  <!-- admin -->
+  <section id="admin" class="panel" hidden>
+    <div class="job-head">
+      <div><h2>Queue and workers</h2><p class="muted" id="admin-updated"></p></div>
+      <label class="check inline"><input id="admin-auto" type="checkbox" checked> Refresh every 3 s</label>
+    </div>
+    <div id="admin-cards" class="stat-row"></div>
+    <h3>Worker processes</h3>
+    <p class="muted">The consumer forks one process per worker (<code>WORKERS</code>) plus one scheduler; workers are
+      recycled after <code>WORKER_MAX_TASKS</code> jobs to give memory back.</p>
+    <div class="table-wrap"><table id="admin-procs"></table></div>
+    <h3>Running</h3><div class="table-wrap"><table id="admin-running"></table></div>
+    <h3>Queued</h3><div class="table-wrap"><table id="admin-queued"></table></div>
+    <h3>Recent failures</h3><div class="table-wrap"><table id="admin-failed"></table></div>
+    <p class="muted">Trends and alerts: Grafana, from <code>/metrics</code> (see the README).</p>
+  </section>
 </main>
+
+<dialog id="confirm-dialog" class="dialog">
+  <p id="confirm-text"></p>
+  <div class="row"><button id="confirm-yes" class="btn primary" type="button">Yes</button>
+    <button id="confirm-no" class="btn ghost" type="button">No</button></div>
+</dialog>
+
+<dialog id="login-dialog" class="dialog" aria-labelledby="login-title">
+  <form id="login-form" method="dialog">
+    <div class="dialog-head"><h2 id="login-title">Administrator</h2>
+      <button id="login-close" class="btn ghost small" type="button" aria-label="Close">&times;</button></div>
+    <p class="muted" id="login-why">History and the admin area need the admin token (<code>ADMIN_TOKEN</code>).</p>
+    <label class="field">Admin token <input id="login-token" type="password" autocomplete="current-password" required></label>
+    <p id="login-error" class="error" hidden></p>
+    <div class="row"><button class="btn primary" type="submit">Log in</button></div>
+  </form>
+</dialog>
 
 <dialog id="sample-dialog" class="dialog" aria-labelledby="sample-title">
   <div class="dialog-head">

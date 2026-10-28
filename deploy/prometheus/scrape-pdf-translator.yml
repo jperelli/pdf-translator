@@ -1,0 +1,11 @@
+# Add to the scrape_configs of prometheus.yml. Inside Coolify the app has the network alias "pdf-translator"
+# (Application > Advanced > Network aliases), so Prometheus scrapes it on the internal network.
+- job_name: pdf-translator
+  scrape_interval: 30s
+  metrics_path: /metrics
+  scheme: http
+  authorization:
+    type: Bearer
+    credentials: <METRICS_TOKEN>   # same value as the app's METRICS_TOKEN env var
+  static_configs:
+    - targets: ["pdf-translator:8000"]

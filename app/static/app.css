@@ -215,3 +215,12 @@ tr.total td { font-weight: 600; border-top: 1px solid var(--line); }
 .metric-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 10px 0 2px; font-size: 13px; }
 .chart-box { position: relative; height: 220px; margin: 6px 0 4px; }
 .chart-box.tall { height: 260px; }
+
+/* admin */
+#admin td.actions { white-space: nowrap; }
+#admin td.actions button { margin-right: 6px; }
+#admin .worker { font-family: ui-monospace, monospace; font-size: 12px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.mid { background: var(--warn); }
+#login-form .field { display: grid; gap: 6px; margin-top: 10px; }
+#login-form input { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }

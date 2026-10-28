@@ -55,9 +55,37 @@ def translate_job(job_id: str, version: int, attempt: int) -> None:
     run_job(job_id, version, attempt)
 
 
+class JobCanceled(Exception):
+    """The job was canceled or handed to another attempt while this worker was running it."""
+
+
 @huey.periodic_task(crontab(minute="*"))
 def recover_lost_jobs() -> None:
+    store().set_meta("worker_seen", time.time())  # the scheduler and at least one worker are alive (for /metrics)
     recover(time.time())
+
+
+def worker_processes() -> list[dict[str, Any]]:
+    """Huey processes on this host with their memory (read from /proc: workers share the container)."""
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace")
+            if "huey_consumer" not in cmd or "app.worker" not in cmd:
+                continue
+            with open(f"/proc/{d}/status") as f:
+                st = dict(line.split(":", 1) for line in f if ":" in line)
+            out.append({"pid": int(d), "ppid": int(st["PPid"].strip()),
+                        "rss_bytes": int(st.get("VmRSS", "0 kB").split()[0]) * 1024})
+        except (OSError, ValueError, KeyError):
+            continue
+    pids = {p["pid"] for p in out}
+    for p in out:  # the consumer forks the workers: the one whose parent is not a huey process is the consumer
+        p["role"] = "worker" if p["ppid"] in pids else "consumer"
+    return sorted(out, key=lambda p: p["pid"])
 
 
 def worker_token(pid: int | None = None) -> str:
@@ -119,8 +147,14 @@ def run_job(job_id: str, version: int, attempt: int) -> None:
         return
     row = db.job(job_id)
     started = time.time()
+    checked = [started]
 
     def emit(event: dict[str, Any]) -> None:
+        if time.time() - checked[0] > 2:  # canceled from /admin? stop instead of spending more tokens
+            checked[0] = time.time()
+            now = db.job(job_id)
+            if not now or now["attempt"] != attempt or now["status"] != "running":
+                raise JobCanceled(job_id)
         db.add_event(job_id, version, attempt, {"t": round(time.time() - started, 2), "v": version, **event})
 
     stop = threading.Event()
@@ -135,6 +169,9 @@ def run_job(job_id: str, version: int, attempt: int) -> None:
     result, error = None, None
     try:
         result = asyncio.run(_execute(row, version, emit))
+    except JobCanceled:
+        log.info("job %s attempt %s canceled while running", job_id, attempt)
+        return  # the cancel already wrote the final state
     except (InvalidDocument, PipelineError, ValueError) as exc:
         error = str(exc)
     except Exception as exc:  # never leak a stack trace to the user, keep it in the logs

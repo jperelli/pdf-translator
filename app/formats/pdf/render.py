@@ -339,16 +339,14 @@ class Probe:
         return r
 
 
-_SCRATCH: dict[tuple[float, float], pymupdf.Document] = {}
-
-
 def probe(unit: TextUnit, text: str, fit: Fit, lang: Language, fonts: FontBook | None,
           page_rect: pymupdf.Rect) -> Probe:
     html, css = unit_html(unit, text, lang, fonts)
     css = (fonts.font_face_css() if fonts else "") + css
     rect = pymupdf.Rect(fit.rect) if fit.rect else layout_box(unit)
-    key = (round(page_rect.width), round(page_rect.height))
-    doc = _SCRATCH.setdefault(key, pymupdf.open())
+    # a fresh document per probe: deleting pages does not free the fonts embedded on them, and with CJK text
+    # every probe embeds another copy of the fallback font (a long-lived scratch document reached 2.7 GB)
+    doc = pymupdf.open()
     page = doc.new_page(width=max(page_rect.width, rect.x1 + 10), height=max(page_rect.height, rect.y1 + 10))
     try:
         _, scale = page.insert_htmlbox(rect, html, css=css, archive=fonts.archive if fonts else None,
@@ -362,7 +360,7 @@ def probe(unit: TextUnit, text: str, fit: Fit, lang: Language, fonts: FontBook |
                     spans += [(sp["font"], sp["text"]) for sp in ln["spans"] if sp["text"].strip()]
         return Probe(lines, spans, scale)
     finally:
-        doc.delete_page(page.number)
+        doc.close()
 
 
 def _low(fit: Fit) -> float:

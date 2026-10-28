@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # complete an embedded subset with the full font of its own family from Google Fonts (cached on /data)
     font_downloads: bool = True
 
+    # Admin area (/admin, history, delete) and Prometheus /metrics. Empty = disabled.
+    admin_token: str = ""
+    metrics_token: str = ""  # bearer token for /metrics; defaults to admin_token
+
     # Job queue (Huey on SQLite). Immediate mode runs a task inside the caller: tests and single-process dev.
     queue_immediate: bool = False
     worker_heartbeat_s: float = 15

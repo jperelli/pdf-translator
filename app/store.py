@@ -45,15 +45,45 @@ CREATE TABLE IF NOT EXISTS events (
     attempt INTEGER NOT NULL,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS counters (
+    name TEXT NOT NULL,
+    labels TEXT NOT NULL,
+    value REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (name, labels)
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created DESC);
 CREATE INDEX IF NOT EXISTS events_job ON events(job_id, version, attempt, id);
 """
 # columns added after the first release; ALTER TABLE keeps existing databases on /data usable
 MIGRATIONS = {
-    "jobs": {"version": "INTEGER NOT NULL DEFAULT 1", "attempt": "INTEGER NOT NULL DEFAULT 1", "heartbeat": "REAL", "worker": "TEXT"},
+    "jobs": {"version": "INTEGER NOT NULL DEFAULT 1", "attempt": "INTEGER NOT NULL DEFAULT 1", "heartbeat": "REAL",
+             "worker": "TEXT", "queued_at": "REAL", "started": "REAL"},
     "versions": {"attempt": "INTEGER NOT NULL DEFAULT 1"},
 }
 TERMINAL = ("done", "error")
+# Prometheus-style histogram buckets (seconds)
+DURATION_BUCKETS = (10, 30, 60, 120, 300, 600, 1200, 1800, 3600)
+WAIT_BUCKETS = (1, 5, 15, 60, 300, 900, 3600)
+
+
+def _labels(labels: dict[str, Any] | None) -> str:
+    return json.dumps(dict(sorted((labels or {}).items())), separators=(",", ":"))
+
+
+def _count(db: sqlite3.Connection, name: str, labels: dict[str, Any] | None = None, by: float = 1) -> None:
+    """Monotonic counters for /metrics: they survive restarts and the TTL cleanup of old jobs."""
+    db.execute("INSERT INTO counters (name, labels, value) VALUES (?, ?, ?) "
+               "ON CONFLICT(name, labels) DO UPDATE SET value=value+excluded.value", (name, _labels(labels), by))
+
+
+def _observe(db: sqlite3.Connection, name: str, value: float, buckets: tuple, labels: dict | None = None) -> None:
+    for le in buckets:
+        if value <= le:
+            _count(db, f"{name}_bucket", {**(labels or {}), "le": str(le)})
+    _count(db, f"{name}_bucket", {**(labels or {}), "le": "+Inf"})
+    _count(db, f"{name}_sum", labels, value)
+    _count(db, f"{name}_count", labels)
 
 
 class Store:
@@ -100,8 +130,10 @@ class Store:
     def create_job(self, job_id: str, filename: str, target: str, purpose: str) -> None:
         now = time.time()
         with self._tx() as db:
-            db.execute("INSERT INTO jobs (id, filename, target, purpose, status, created, updated, version, attempt) "
-                       "VALUES (?, ?, ?, ?, 'queued', ?, ?, 1, 1)", (job_id, filename, target, purpose, now, now))
+            db.execute("INSERT INTO jobs (id, filename, target, purpose, status, created, updated, version, attempt, "
+                       "queued_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, 1, 1, ?)",
+                       (job_id, filename, target, purpose, now, now, now))
+            _count(db, "jobs_created_total", {"kind": "translation"})
             db.execute("INSERT INTO versions (job_id, version, created, attempt) VALUES (?, 1, ?, 1)", (job_id, now))
 
     def new_version(self, job_id: str, decisions: dict[str, Any]) -> int:
@@ -114,16 +146,21 @@ class Store:
             now = time.time()
             db.execute("INSERT INTO versions (job_id, version, created, decisions, attempt) VALUES (?, ?, ?, ?, 1)",
                        (job_id, version, now, json.dumps(decisions)))
-            db.execute("UPDATE jobs SET version=?, attempt=1, status='queued', error=NULL, heartbeat=NULL, updated=? "
-                       "WHERE id=?", (version, now, job_id))
+            db.execute("UPDATE jobs SET version=?, attempt=1, status='queued', error=NULL, heartbeat=NULL, updated=?, "
+                       "queued_at=? WHERE id=?", (version, now, now, job_id))
+            _count(db, "jobs_created_total", {"kind": "redo"})
         return version
 
     def start(self, job_id: str, version: int, attempt: int, worker: str = "") -> bool:
-        """A worker claims the job; False if it was superseded (requeued, deleted) in the meantime."""
-        with self._lock:  # fetchall: a RETURNING statement holds the write lock until it is fully read
-            return bool(self._db.execute("UPDATE jobs SET status='running', heartbeat=?, updated=?, worker=? "
-                                         "WHERE id=? AND version=? AND attempt=? AND status='queued' RETURNING id",
-                                         (time.time(), time.time(), worker, job_id, version, attempt)).fetchall())
+        """A worker claims the job; False if it was superseded (requeued, canceled, deleted) in the meantime."""
+        now = time.time()
+        with self._tx() as db:  # fetchall: a RETURNING statement holds the write lock until it is fully read
+            rows = db.execute("UPDATE jobs SET status='running', heartbeat=?, updated=?, worker=?, started=? "
+                              "WHERE id=? AND version=? AND attempt=? AND status='queued' RETURNING queued_at",
+                              (now, now, worker, now, job_id, version, attempt)).fetchall()
+            if rows and rows[0]["queued_at"]:
+                _observe(db, "queue_wait_seconds", now - rows[0]["queued_at"], WAIT_BUCKETS)
+            return bool(rows)
 
     def heartbeat(self, job_id: str, attempt: int) -> None:
         self._exec("UPDATE jobs SET heartbeat=? WHERE id=? AND attempt=? AND status='running'",
@@ -144,7 +181,20 @@ class Store:
             db.execute("INSERT INTO events (job_id, version, attempt, data) VALUES (?, ?, ?, ?)",
                        (job_id, version, attempt, json.dumps(final_event, ensure_ascii=False)))
             now = time.time()
+            info = db.execute("SELECT purpose, started FROM jobs WHERE id=?", (job_id,)).fetchone()
+            status = "done" if result is not None else "error"
+            _count(db, "jobs_finished_total", {"status": status, "purpose": info["purpose"]})
+            if info["started"]:
+                _observe(db, "job_duration_seconds", now - info["started"], DURATION_BUCKETS, {"status": status})
+            for c in (result or {}).get("calls", []):
+                lab = {"model": c["model"], "stage": c["stage"]}
+                _count(db, "llm_input_tokens_total", lab, c["input_tokens"])
+                _count(db, "llm_output_tokens_total", lab, c["output_tokens"])
+                _count(db, "llm_cached_tokens_total", lab, c.get("cached_tokens", 0))
+                _count(db, "llm_requests_total", lab, c["requests"])
+                _count(db, "llm_cost_usd_total", lab, c["cost_usd"])
             if result is not None:
+                _count(db, "pages_translated_total", None, len(result["report"]["pages"]))
                 db.execute("UPDATE versions SET result=?, attempt=? WHERE job_id=? AND version=?",
                            (json.dumps(result, ensure_ascii=False), attempt, job_id, version))
                 r = result["report"]
@@ -175,7 +225,70 @@ class Store:
             row = rows[0]
             db.execute("UPDATE versions SET attempt=? WHERE job_id=? AND version=?",
                        (row["attempt"], job_id, row["version"]))
+            db.execute("UPDATE jobs SET queued_at=? WHERE id=?", (time.time(), job_id))
+            _count(db, "jobs_retried_total", {"reason": "lost_worker"})
             return row["attempt"]
+
+    def retry(self, job_id: str) -> tuple[int, int]:
+        """Admin: run a failed job again (same version, new attempt). Returns (version, attempt)."""
+        now = time.time()
+        with self._tx() as db:
+            rows = db.execute("UPDATE jobs SET status='queued', attempt=attempt+1, error=NULL, heartbeat=NULL, "
+                              "worker=NULL, updated=?, queued_at=? WHERE id=? AND status='error' "
+                              "RETURNING version, attempt", (now, now, job_id)).fetchall()
+            if not rows:
+                raise ValueError("Only a failed job can be retried.")
+            v, a = rows[0]["version"], rows[0]["attempt"]
+            db.execute("UPDATE versions SET attempt=? WHERE job_id=? AND version=?", (a, job_id, v))
+            db.execute("INSERT INTO events (job_id, version, attempt, data) VALUES (?, ?, ?, ?)",
+                       (job_id, v, a, json.dumps({"type": "stage", "stage": "queued", "t": 0, "v": v, "percent": 0,
+                                                  "message": "Retried by an administrator"})))
+            _count(db, "jobs_retried_total", {"reason": "admin"})
+        return v, a
+
+    def cancel(self, job_id: str, message: str = "Canceled by an administrator.") -> None:
+        """Admin: stop a queued or running job. The attempt counter moves on, so the worker running the old
+        attempt can no longer write its result (and stops at its next event, see app/worker.py)."""
+        with self._tx() as db:
+            row = db.execute("SELECT version, attempt, status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None or row["status"] in TERMINAL:
+                raise ValueError("Only a queued or running job can be canceled.")
+            db.execute("INSERT INTO events (job_id, version, attempt, data) VALUES (?, ?, ?, ?)",
+                       (job_id, row["version"], row["attempt"],
+                        json.dumps({"type": "error", "message": message, "t": 0, "v": row["version"]})))
+            db.execute("UPDATE versions SET attempt=? WHERE job_id=? AND version=?",
+                       (row["attempt"], job_id, row["version"]))  # the log stays on the canceled attempt
+            db.execute("UPDATE jobs SET status='error', error=?, attempt=attempt+1, updated=? WHERE id=?",
+                       (message, time.time(), job_id))
+            _count(db, "jobs_canceled_total", {"was": row["status"]})
+
+    # ------------------------------------------------------------------ admin / metrics
+
+    def set_meta(self, key: str, value: Any) -> None:
+        self._exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                   (key, json.dumps(value)))
+
+    def meta(self, key: str, default: Any = None) -> Any:
+        row = self._exec("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def counters(self) -> list[tuple[str, dict[str, str], float]]:
+        rows = self._exec("SELECT name, labels, value FROM counters ORDER BY name, labels").fetchall()
+        return [(r["name"], json.loads(r["labels"]), r["value"]) for r in rows]
+
+    def status_counts(self) -> dict[str, int]:
+        return {r[0]: r[1] for r in self._exec("SELECT status, COUNT(*) FROM jobs GROUP BY status").fetchall()}
+
+    def by_status(self, status: str, limit: int = 50) -> list[dict[str, Any]]:
+        order = "updated DESC" if status in TERMINAL else "COALESCE(queued_at, created)"
+        rows = self._exec(f"SELECT * FROM jobs WHERE status=? ORDER BY {order} LIMIT ?", (status, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def last_event(self, job_id: str, version: int, attempt: int) -> dict[str, Any] | None:
+        row = self._exec("SELECT data FROM events WHERE job_id=? AND version=? AND attempt=? AND "
+                         "json_extract(data, '$.type') NOT IN ('trace', 'tool') ORDER BY id DESC LIMIT 1",
+                         (job_id, version, attempt)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def fail(self, job_id: str, attempt: int, message: str) -> None:
         row = self.job(job_id)

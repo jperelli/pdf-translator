@@ -62,6 +62,8 @@ def test_history_versions_and_redo(client):
     job = wait(client, r.json()["id"])
     assert job["status"] == "done" and job["purpose"] == "fast"
     jid = job["id"]
+    assert client.get("/api/jobs").status_code == 401  # the history is admin-only
+    assert client.post("/api/admin/login", json={"token": "test-admin-token"}).status_code == 200
     listed = client.get("/api/jobs").json()
     assert any(j["id"] == jid and j["versions"] == 1 for j in listed["jobs"])
     est = client.post(f"/api/jobs/{jid}/estimate", json={"terms": {"keep_original": ["holeshot"]}}).json()

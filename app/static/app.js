@@ -18,14 +18,57 @@ const fmtDate = (t) => new Date(t * 1000).toLocaleString();
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(body.error || `Request failed (${res.status})`), { status: res.status });
   return body;
+}
+
+// in-page confirmation (a native confirm() freezes the page and does not match the UI)
+function ask(text) {
+  const dlg = $("#confirm-dialog");
+  $("#confirm-text").textContent = text;
+  dlg.showModal();
+  return new Promise((resolve) => {
+    $("#confirm-yes").onclick = () => { dlg.close(); resolve(true); };
+    $("#confirm-no").onclick = () => { dlg.close(); resolve(false); };
+    dlg.oncancel = () => resolve(false);
+  });
+}
+
+// admin-only calls: on 401 ask for the admin token once, then retry
+async function adminApi(path, opts) {
+  try { return await api(path, opts); } catch (err) {
+    if (err.status !== 401) throw err;
+    if (!(await login())) throw err;
+    return api(path, opts);
+  }
+}
+
+function login(why) {
+  const dlg = $("#login-dialog");
+  if (why) $("#login-why").textContent = why;
+  $("#login-error").hidden = true;
+  $("#login-token").value = "";
+  dlg.showModal();
+  return new Promise((resolve) => {
+    $("#login-close").onclick = () => { dlg.close(); resolve(false); };
+    $("#login-form").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await postJson("/api/admin/login", { token: $("#login-token").value });
+        dlg.close();
+        $("#nav-logout").hidden = false;
+        resolve(true);
+      } catch (err) { $("#login-error").textContent = err.message; $("#login-error").hidden = false; }
+    };
+  });
 }
 const postJson = (path, data) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
 
 function show(id) {
-  for (const s of ["upload", "progress", "result", "history"]) $("#" + s).hidden = s !== id;
+  for (const s of ["upload", "progress", "result", "history", "admin"]) $("#" + s).hidden = s !== id;
   $("#nav-history").classList.toggle("active", id === "history");
+  $("#nav-admin").classList.toggle("active", id === "admin");
+  if (id !== "admin") clearTimeout(state.adminTimer);
   $("#nav-new").classList.toggle("active", id === "upload");
 }
 
@@ -42,7 +85,8 @@ function openTab(group, name) { const t = $(`[data-group="${group}"] > [data-tab
 function route() {
   const h = location.hash;
   const m = h.match(/job=([0-9a-f]{32})(?:&v=(\d+))?/);
-  if (h === "#history") return loadHistory();
+  if (h === "#history") return loadHistory().catch(() => { location.hash = ""; });
+  if (h === "#admin") return loadAdmin().catch(() => { location.hash = ""; });
   if (m) return resume(m[1], m[2] ? Number(m[2]) : null);
   reset(false);
 }
@@ -531,7 +575,7 @@ $("#redo").onclick = async () => {
 async function loadHistory() {
   show("history");
   const { offset, limit } = state.history;
-  const data = await api(`/api/jobs?limit=${limit}&offset=${offset}`);
+  const data = await adminApi(`/api/jobs?limit=${limit}&offset=${offset}`);
   const rows = data.jobs.map((j) => `<tr>
       <td>${esc(fmtDate(j.created))}</td><td class="fname">${esc(j.filename)}</td><td>${esc(j.target)}</td>
       <td>${purposeLabel(j.purpose)}</td><td>${j.versions || 0}</td>
@@ -546,10 +590,80 @@ async function loadHistory() {
   $("#h-label").textContent = data.total ? `${offset + 1}–${Math.min(offset + limit, data.total)} of ${data.total}` : "";
   $("#h-prev").disabled = offset === 0;
   $("#h-next").disabled = offset + limit >= data.total;
-  $$("[data-del]").forEach((a) => (a.onclick = async (e) => { e.preventDefault(); if (confirm("Delete this run and its files?")) { await api(`/api/jobs/${a.dataset.del}`, { method: "DELETE" }); loadHistory(); } }));
-  $$("[data-pin]").forEach((a) => (a.onclick = async (e) => { e.preventDefault(); await api(`/api/jobs/${a.dataset.pin}/pin?pinned=${a.dataset.pinned === "1" ? "false" : "true"}`, { method: "POST" }); loadHistory(); }));
+  $$("[data-del]").forEach((a) => (a.onclick = async (e) => { e.preventDefault(); if (await ask("Delete this run and its files?")) { await adminApi(`/api/jobs/${a.dataset.del}`, { method: "DELETE" }); loadHistory(); } }));
+  $$("[data-pin]").forEach((a) => (a.onclick = async (e) => { e.preventDefault(); await adminApi(`/api/jobs/${a.dataset.pin}/pin?pinned=${a.dataset.pinned === "1" ? "false" : "true"}`, { method: "POST" }); loadHistory(); }));
 }
 $("#h-prev").onclick = () => { state.history.offset = Math.max(0, state.history.offset - state.history.limit); loadHistory(); };
 $("#h-next").onclick = () => { state.history.offset += state.history.limit; loadHistory(); };
+
+// ------------------------------------------------------------------ admin
+const fmtAge = (s) => (s == null ? "–" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`);
+
+async function loadAdmin() {
+  show("admin");
+  clearTimeout(state.adminTimer);
+  const d = await adminApi("/api/admin/overview");
+  $("#nav-logout").hidden = false;
+  const workerOk = d.worker_last_seen_s != null && d.worker_last_seen_s < 150;
+  const t = d.totals;
+  $("#admin-cards").innerHTML = [
+    [d.queue.pending ?? "?", "waiting in the queue"],
+    [(d.counts.running || 0), "running"],
+    [`<span class="dot ${workerOk ? "ok" : "bad"}"></span>${fmtAge(d.worker_last_seen_s)}`, "since workers last checked in (every minute)"],
+    [t.finished_done, "finished"],
+    [t.finished_error, "failed"],
+    [`${t.retried} / ${t.canceled}`, "retried / canceled"],
+    [t.pages, "pages translated"],
+    [fmtUsd(t.cost_usd), `estimated cost · ${fmtTokens(t.tokens)} tokens`],
+  ].map(([v, l]) => `<div class="stat"><b>${v}</b><span>${esc(l)}</span></div>`).join("");
+  const name = (j) => `<a href="#job=${j.id}">${esc(j.filename)}</a> <span class="muted">→ ${esc(j.target)} · ${purposeLabel(j.purpose)}${j.version > 1 ? ` · v${j.version}` : ""}${j.attempt > 1 ? ` · attempt ${j.attempt}` : ""}</span>`;
+  const btn = (act, id, label) => `<button class="btn ghost small" data-act="${act}" data-id="${id}">${label}</button>`;
+  const table = (sel, head, rows, empty) => { $(sel).innerHTML = `<tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>` + (rows.join("") || `<tr><td colspan="${head.length}" class="muted">${empty}</td></tr>`); };
+  const mb = (b) => `${Math.round(b / 1048576)} MB`;
+  table("#admin-procs", ["PID", "Role", "Memory", "Job"], (d.processes || []).map((p) => `<tr>
+    <td class="worker">${p.pid}</td><td>${esc(p.role)}</td><td class="${p.rss_bytes > 1.5 * 2 ** 30 ? "bad" : p.rss_bytes > 2 ** 30 ? "mid" : ""}">${mb(p.rss_bytes)}</td>
+    <td>${p.job ? `<a href="#job=${p.job}">${esc(p.filename)}</a>` : `<span class="muted">${p.role === "worker" ? "idle" : ""}</span>`}</td></tr>`),
+    "No worker processes found on this host (the consumer may be down).");
+  table("#admin-running", ["Job", "Progress", "Running for", "Worker", "Last event", ""], d.running.map((j) => `<tr>
+    <td>${name(j)}</td><td>${j.percent != null ? Math.round(j.percent) + "%" : "–"}</td><td>${fmtAge(j.running_s)}</td>
+    <td class="worker"><span class="dot ${j.worker_alive === false ? "bad" : j.worker_alive ? "ok" : "mid"}" title="${j.worker_alive === false ? "process gone: will be retried" : j.worker_alive ? "process alive" : "unknown host"}"></span>${esc((j.worker || "").split(":").slice(0, 2).join(" pid "))}</td>
+    <td class="muted">${esc(j.last_event ? (j.last_event.message || `${j.last_event.type.replace("_", " ")}${j.last_event.page ? ` p. ${j.last_event.page}` : ""}`) : "")}</td>
+    <td class="actions">${btn("cancel", j.id, "Cancel")}</td></tr>`), "Nothing running.");
+  table("#admin-queued", ["Job", "Waiting for", ""], d.queued.map((j) => `<tr>
+    <td>${name(j)}</td><td>${fmtAge(j.waiting_s)}</td><td class="actions">${btn("cancel", j.id, "Cancel")}</td></tr>`), "The queue is empty.");
+  table("#admin-failed", ["Job", "When", "Error", ""], d.failed.map((j) => `<tr>
+    <td>${name(j)}</td><td>${esc(fmtDate(j.updated))}</td><td class="bad">${esc(j.error || "")}</td>
+    <td class="actions">${btn("retry", j.id, "Retry")}</td></tr>`), "No failures.");
+  $$("#admin [data-act]").forEach((b) => (b.onclick = async () => {
+    const { act, id } = b.dataset;
+    clearTimeout(state.adminTimer); // no refresh while deciding
+    if (act === "cancel" && !(await ask("Cancel this job? A running job stops at its next step."))) return loadAdmin();
+    b.disabled = true;
+    try {
+      await adminApi(`/api/admin/jobs/${id}/${act}`, { method: "POST" });
+      state.adminNotice = act === "cancel" ? "Job canceled." : "Job sent back to the queue.";
+    } catch (err) { state.adminNotice = err.message; }
+    loadAdmin();
+  }));
+  $("#admin-updated").textContent = `Updated ${new Date().toLocaleTimeString()}${state.adminNotice ? ` · ${state.adminNotice}` : ""}`;
+  if ($("#admin-auto").checked) state.adminTimer = setTimeout(refreshAdmin, 3000);
+}
+
+// the refresh rebuilds the tables: never under the pointer of someone about to click an action
+function refreshAdmin() {
+  if ($("#admin [data-act]:hover")) { state.adminTimer = setTimeout(refreshAdmin, 1000); return; }
+  loadAdmin().catch(() => {});
+}
+$("#admin-auto").onchange = () => { if ($("#admin-auto").checked) loadAdmin(); else clearTimeout(state.adminTimer); };
+$("#nav-logout").onclick = async (e) => {
+  e.preventDefault();
+  await postJson("/api/admin/logout", {});
+  $("#nav-logout").hidden = true;
+  location.hash = "";
+};
+api("/api/admin/session").then((s) => {
+  $("#nav-logout").hidden = !s.admin;
+  $("#nav-admin").hidden = $("#nav-history").hidden = !s.enabled;
+}).catch(() => {});
 
 init().catch((err) => formError(err.message));
