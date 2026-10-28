@@ -39,8 +39,9 @@ run against a local pseudo-translation model (zero tokens, see [Pseudo mode](#ps
 
 ## Testing guide (for reviewers)
 
-`docker compose up --build`, open http://localhost:8000. The header says **Live** (key found) or
-**Demo mode**. Every sample below is one click away under "Or try a sample".
+`docker compose up --build`, open http://localhost:8000. Without `OPENAI_API_KEY` the app runs in demo mode
+(the result screen says "demo (pseudo)" next to the score). Every sample below is one click away: **Try a
+sample** in the drop zone.
 
 | Try | What to look at |
 |---|---|

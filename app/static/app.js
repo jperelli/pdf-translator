@@ -58,12 +58,13 @@ async function init() {
   $$('input[name="purpose"]').forEach((r) => (r.checked = r.value === purpose));
   $("#drop-hint").textContent = `Up to ${state.config.limits.max_upload_mb} MB and ${state.config.limits.max_pages} pages`;
   const samples = await api("/api/samples").catch(() => []);
+  $("#sample-btn").hidden = !samples.length;
   for (const s of samples) {
-    const b = document.createElement("button");
-    b.className = "chip"; b.type = "button"; b.title = s.description;
-    b.innerHTML = `${esc(s.name.replace(/\.pdf$/, ""))}<small>${s.pages} p.</small>`;
-    b.onclick = () => start({ sample: s.name });
-    $("#samples").append(b);
+    const li = document.createElement("li");
+    li.innerHTML = `<button type="button" class="sample-item"><span class="sample-name">${esc(s.name.replace(/\.pdf$/, ""))}` +
+      `<small>${s.pages} ${s.pages === 1 ? "page" : "pages"}</small></span><span class="sample-desc">${esc(s.description)}</span></button>`;
+    li.firstChild.onclick = () => pickSample(s);
+    $("#samples").append(li);
   }
   tabs("main", (t) => t === "preview" && renderPage());
   tabs("details");
@@ -77,14 +78,37 @@ function pickFile(f) {
   if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") return formError("Only PDF files are supported for now.");
   if (f.size > mb * 1024 * 1024) return formError(`This file is ${(f.size / 1048576).toFixed(1)} MB; the limit is ${mb} MB.`);
   state.file = f;
+  state.sample = null;
+  selected(`<b>${esc(f.name)}</b> · ${(f.size / 1024).toFixed(0)} KB`);
+}
+
+// a sample fills the drop zone exactly like a chosen file; Translate sends its name instead of the bytes
+function pickSample(s) {
+  $("#sample-dialog").close();
+  $("#form-error").hidden = true;
+  state.file = null;
+  state.sample = s.name;
+  $("#file").value = "";
+  selected(`<b>${esc(s.name)}</b> · ${s.pages} ${s.pages === 1 ? "page" : "pages"} · sample`);
+}
+
+function selected(html) {
   $("#drop").classList.add("has-file");
-  $("#drop-text").innerHTML = `<b>${esc(f.name)}</b> · ${(f.size / 1024).toFixed(0)} KB`;
+  $("#drop-text").innerHTML = html;
   $("#go").disabled = false;
 }
 function formError(msg) { const e = $("#form-error"); e.textContent = msg; e.hidden = false; }
 
 const drop = $("#drop");
-drop.addEventListener("click", () => $("#file").click());
+drop.addEventListener("click", (e) => {
+  if (e.target === $("#file")) return; // the input's own click bubbles up here: let it open the picker
+  e.preventDefault(); // the label would activate the input a second time
+  $("#file").click();
+});
+$("#sample-btn").addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); $("#sample-dialog").showModal(); });
+$("#sample-btn").addEventListener("keydown", (e) => e.stopPropagation());
+$("#sample-close").addEventListener("click", () => $("#sample-dialog").close());
+$("#sample-dialog").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#file").click(); } });
 $("#file").addEventListener("change", (e) => pickFile(e.target.files[0]));
 for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });
@@ -92,13 +116,17 @@ for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, (e) => { e.pre
 drop.addEventListener("drop", (e) => pickFile(e.dataTransfer.files[0]));
 $("#target").addEventListener("change", (e) => localStorage.setItem("target", e.target.value));
 $$('input[name="purpose"]').forEach((r) => r.addEventListener("change", () => localStorage.setItem("purpose", r.value)));
-$("#form").addEventListener("submit", (e) => { e.preventDefault(); if (state.file) start({ file: state.file }); });
+$("#form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (state.file) start({ file: state.file });
+  else if (state.sample) start({ sample: state.sample });
+});
 $$(".new-btn").forEach((b) => (b.onclick = () => { location.hash = ""; reset(true); }));
 $("#nav-new").onclick = (e) => { e.preventDefault(); location.hash = ""; reset(true); };
 
 function reset(clear) {
   if (clear) history.replaceState(null, "", location.pathname);
-  Object.assign(state, { file: null, job: null, result: null, events: [], decisions: {} });
+  Object.assign(state, { file: null, sample: null, job: null, result: null, events: [], decisions: {} });
   $("#drop").classList.remove("has-file");
   $("#drop-text").innerHTML = "<b>Drop a PDF here</b> or click to choose a file";
   $("#go").disabled = true;
@@ -117,7 +145,7 @@ async function start({ file, sample }) {
     const job = await api("/api/jobs", { method: "POST", body: fd });
     history.replaceState(null, "", "#job=" + job.id);
     follow(job);
-  } catch (err) { formError(err.message); $("#go").disabled = !state.file; }
+  } catch (err) { formError(err.message); $("#go").disabled = !state.file && !state.sample; }
 }
 
 async function resume(id, version) {

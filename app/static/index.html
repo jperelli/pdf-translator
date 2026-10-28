@@ -25,6 +25,7 @@
     <form id="form">
       <label id="drop" class="drop" tabindex="0">
         <input id="file" type="file" accept="application/pdf,.pdf" hidden>
+        <button id="sample-btn" class="btn ghost small sample-btn" type="button">Try a sample</button>
         <span class="drop-icon">PDF</span>
         <span id="drop-text"><b>Drop a PDF here</b> or click to choose a file</span>
         <span id="drop-hint" class="hint"></span>
@@ -41,10 +42,6 @@
       </div>
       <p id="form-error" class="error" hidden></p>
     </form>
-    <div class="samples">
-      <h3>Or try a sample</h3>
-      <div id="samples" class="chips"></div>
-    </div>
   </section>
 
   <!-- progress -->
@@ -140,6 +137,15 @@
     <div class="pager"><button id="h-prev" class="btn ghost small">&larr;</button><span id="h-label"></span><button id="h-next" class="btn ghost small">&rarr;</button></div>
   </section>
 </main>
+
+<dialog id="sample-dialog" class="dialog" aria-labelledby="sample-title">
+  <div class="dialog-head">
+    <h2 id="sample-title">Try a sample</h2>
+    <button id="sample-close" class="btn ghost small" type="button" aria-label="Close">&times;</button>
+  </div>
+  <p class="muted">Short test documents, each built to stress one thing.</p>
+  <ul id="samples" class="sample-list"></ul>
+</dialog>
 <footer class="foot">Built for Stark Future · OpenAI Agents SDK · PyMuPDF</footer>
 <script src="/charts.js"></script>
 <script src="/app.js"></script>
