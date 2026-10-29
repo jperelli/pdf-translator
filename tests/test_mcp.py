@@ -182,6 +182,7 @@ def test_http_progress_arrives_over_sse(http_server, samples):
 def test_upload_then_translate(http_server, samples):
     pdf = (samples / "10-cv-like-en.pdf").read_bytes()
     assert httpx2.post(f"{http_server}/api/uploads", files={"file": ("cv.pdf", pdf)}).status_code == 401
+    assert httpx2.post(f"{http_server}/api/uploads").status_code == 401  # token checked before the form
     up = httpx2.post(f"{http_server}/api/uploads", files={"file": ("cv.pdf", pdf)}, headers=AUTH)
     assert up.status_code == 201 and up.json()["pages"] == 1
     bad = httpx2.post(f"{http_server}/api/uploads", files={"file": ("x.pdf", b"not a pdf")}, headers=AUTH)

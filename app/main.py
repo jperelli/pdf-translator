@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import re
 import time
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from app.languages import LANGUAGES
 from app.models import BlockResult
 from app.review import estimate_tokens
 
+mimetypes.add_type("image/webp", ".webp")  # slim images lack it; with nosniff the type must be right
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 settings = get_settings()
 ROOT = Path(__file__).resolve().parent
@@ -131,12 +133,16 @@ class MCPEndpoint:
 app.add_route("/mcp", MCPEndpoint(), include_in_schema=False)
 
 
-@app.post("/api/uploads", status_code=201)
-async def upload(request: Request, file: UploadFile = File(...)):
-    """For agents: upload a PDF, then call the MCP tool translate_pdf(upload_id=...). Same token as /mcp."""
+def require_mcp_token(request: Request) -> None:
+    """Runs before the body is parsed, so a request without the token gets 401, not a validation error."""
     err = _mcp_auth_error({k.lower(): v for k, v in request.headers.items()})
     if err:
         raise HTTPException(err[0], err[1])
+
+
+@app.post("/api/uploads", status_code=201, dependencies=[Depends(require_mcp_token)])
+async def upload(request: Request, file: UploadFile = File(...)):
+    """For agents: upload a PDF, then call the MCP tool translate_pdf(upload_id=...). Same token as /mcp."""
     data = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
     try:
         return request.app.state.uploads.save(safe_name(file.filename), data)

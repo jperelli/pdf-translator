@@ -89,3 +89,4 @@ def test_landing_page_and_app_routes(client):
     assert 'id="architecture"' in home.text
     for asset in ("/landing.css", "/landing.js", "/landing/p1-de.webp", "/landing/architecture.svg", "/app.js"):
         assert client.get(asset).status_code == 200, asset
+    assert client.get("/landing/p1-de.webp").headers["content-type"] == "image/webp"
