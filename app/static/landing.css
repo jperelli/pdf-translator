@@ -95,6 +95,15 @@ h3 { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
 .steps b { display: block; font-size: 19px; margin: 6px 0 8px; color: #fff; }
 .steps span { color: #b9b7b0; font-size: 14.5px; }
 
+/* architecture */
+.diagram { margin-top: 24px; background: #f5f4f0; border: 1px solid var(--line); border-radius: var(--radius); overflow-x: auto; }
+.diagram a { display: block; min-width: 860px; }
+.diagram img { display: block; width: 100%; height: auto; }
+.arch-notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px; }
+.arch-notes div { border-top: 2px solid var(--gold); padding-top: 12px; }
+.arch-notes b { display: block; margin-bottom: 6px; }
+.arch-notes span { color: var(--body); font-size: 15px; }
+
 /* features */
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 28px; }
 .grid article { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 22px 18px; }
@@ -130,6 +139,7 @@ h3 { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
   .steps { grid-template-columns: 1fr 1fr; }
   .grid { grid-template-columns: 1fr 1fr; }
   .scores { grid-template-columns: repeat(3, 1fr); }
+  .arch-notes { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .top { padding: 10px 16px; }

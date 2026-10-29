@@ -18,6 +18,7 @@
   <nav>
     <a href="#showcase">Results</a>
     <a href="#how">How it works</a>
+    <a href="#architecture">Architecture</a>
     <a href="#features">Features</a>
     <a href="#agents">For agents</a>
     <a class="btn small" href="/app">Translate a PDF</a>
@@ -90,6 +91,29 @@
       <li><b>Fix and report</b><span>Failing blocks go back to a refiner that checks its own fit; stubborn
         ones go to a stronger model that sees the page image. What is left becomes a decision for you.</span></li>
     </ol>
+  </section>
+
+  <section id="architecture" class="architecture">
+    <h2>Architecture</h2>
+    <p class="sub">A web process takes the requests, a queue hands each job to a separate worker process, and the
+      worker runs the pipeline: agents where judgement is needed (gold), plain code where it is not (white), so
+      checks, fonts and layout cost zero tokens. Progress goes back as events through SQLite.</p>
+    <div class="diagram">
+      <a href="/landing/architecture.svg" target="_blank" rel="noopener" aria-label="Open the architecture diagram full size">
+        <img src="/landing/architecture.svg" width="1160" height="922" loading="lazy"
+             alt="Architecture: browsers, AI agents and operators call a FastAPI web process (REST API, progress over SSE, MCP server, admin and metrics). Jobs go through a Huey queue on SQLite to worker processes that run extract, Analyst agent, Translator agent per page, checks, Judge agent, Refiner and Escalation agents, render and a read-back of the written PDF. Storage is a /data volume with SQLite, the queue, job files and a font cache; external services are the OpenAI API and Google Fonts.">
+      </a>
+    </div>
+    <div class="arch-notes">
+      <div><b>One process for requests, others for work</b><span>The web process only validates, enqueues and
+        streams. Translations run in worker processes, so a heavy PDF never slows the site, and a crash or a
+        redeploy hands the job to a new attempt.</span></div>
+      <div><b>An evaluator-optimizer loop</b><span>Translate, check, judge, refine, check again. Each round only
+        touches the blocks that failed, and it stops after a fixed number of rounds or when everything passes.</span></div>
+      <div><b>One source of progress</b><span>Every step writes an event to SQLite. The browser reads it over SSE,
+        agents over MCP progress notifications, the admin page and Prometheus from the same tables.</span></div>
+    </div>
+    <p class="note"><a href="/landing/architecture.svg" target="_blank" rel="noopener">Open the diagram full size</a></p>
   </section>
 
   <section id="features" class="features">

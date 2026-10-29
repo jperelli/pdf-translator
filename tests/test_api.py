@@ -86,5 +86,6 @@ def test_landing_page_and_app_routes(client):
     assert home.status_code == 200 and "Keep the design" in home.text and 'href="/app"' in home.text
     app_page = client.get("/app")
     assert app_page.status_code == 200 and 'id="drop"' in app_page.text
-    for asset in ("/landing.css", "/landing.js", "/landing/p1-de.webp", "/app.js"):
+    assert 'id="architecture"' in home.text
+    for asset in ("/landing.css", "/landing.js", "/landing/p1-de.webp", "/landing/architecture.svg", "/app.js"):
         assert client.get(asset).status_code == 200, asset
